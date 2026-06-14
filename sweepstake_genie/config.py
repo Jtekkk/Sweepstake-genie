@@ -17,6 +17,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "headless": True,
     "delay_between_entries": 3,
     "max_entries_per_run": 50,
+    "concurrency": 3,
     "skip_captcha": True,
     "log_file": "entries.log",
     "database": "sweepstakes.db",
@@ -73,6 +74,10 @@ class Config:
     @property
     def max_entries_per_run(self) -> int:
         return int(self.settings.get("max_entries_per_run", 50))
+
+    @property
+    def concurrency(self) -> int:
+        return int(self.settings.get("concurrency", 3))
 
     @property
     def skip_captcha(self) -> bool:

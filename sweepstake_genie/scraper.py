@@ -14,12 +14,41 @@ from __future__ import annotations
 import logging
 import time
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, parse_qs, urlencode
 
 import requests
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
+
+# ── URL normalisation ─────────────────────────────────────────────────────────
+
+_TRACKING_PARAMS = frozenset([
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "utm_id", "utm_name", "fbclid", "gclid", "msclkid", "ref", "source",
+    "affiliate", "partner", "cid", "eid", "sid", "tid", "via", "mc_cid",
+    "mc_eid", "_ga", "zanpid", "origin", "igshid",
+])
+
+
+def _normalize_url(url: str) -> str:
+    """Strip tracking params, fragments, and normalize scheme/host for dedup."""
+    try:
+        p = urlparse(url)
+        params = parse_qs(p.query, keep_blank_values=False)
+        filtered = {k: v for k, v in params.items() if k.lower() not in _TRACKING_PARAMS}
+        clean_query = urlencode(filtered, doseq=True)
+        normalized = p._replace(
+            scheme=p.scheme.lower(),
+            netloc=p.netloc.lower().replace("www.", "", 1),
+            path=p.path.rstrip("/") or "/",
+            query=clean_query,
+            fragment="",
+        )
+        return normalized.geturl()
+    except Exception:
+        return url
+
 
 # ── Request config ────────────────────────────────────────────────────────────
 
@@ -516,15 +545,16 @@ def _extract_external_links(
             continue
         if _should_skip(full_url):
             continue
-        if full_url in seen:
+        normalized = _normalize_url(full_url)
+        if normalized in seen:
             continue
         title = anchor.get_text(strip=True)
         if len(title) < min_title_len:
             continue
         if not _looks_like_sweepstake(title, full_url):
             continue
-        seen.add(full_url)
-        results.append({"url": full_url, "title": title, "source": source})
+        seen.add(normalized)
+        results.append({"url": normalized, "title": title, "source": source})
 
     return results
 
@@ -579,7 +609,7 @@ def _scrape_rss(feed_url: str, source: str) -> list[dict[str, Any]]:
         url   = (link_tag.string or link_tag.get_text()).strip()
         title = title_tag.get_text(strip=True)
         if url.startswith("http") and not _should_skip(url) and _looks_like_sweepstake(title, url):
-            results.append({"url": url, "title": title, "source": source})
+            results.append({"url": _normalize_url(url), "title": title, "source": source})
 
     for entry in soup.find_all("entry"):
         link_tag  = entry.find("link")
@@ -589,7 +619,7 @@ def _scrape_rss(feed_url: str, source: str) -> list[dict[str, Any]]:
         url   = link_tag.get("href", "").strip()
         title = title_tag.get_text(strip=True)
         if url.startswith("http") and not _should_skip(url) and _looks_like_sweepstake(title, url):
-            results.append({"url": url, "title": title, "source": source})
+            results.append({"url": _normalize_url(url), "title": title, "source": source})
 
     logger.info("%s (RSS): %d sweepstakes", source, len(results))
     return results
@@ -618,16 +648,19 @@ def _scrape_reddit_subs(subreddits: list[str]) -> list[dict[str, Any]]:
             for post in posts:
                 pd  = post.get("data", {})
                 url = pd.get("url", "")
-                if not url or url in seen or pd.get("is_self"):
+                if not url or pd.get("is_self"):
                     continue
                 if _should_skip(url):
+                    continue
+                normalized = _normalize_url(url)
+                if normalized in seen:
                     continue
                 title = pd.get("title", "")
                 if len(title) < 5:
                     continue
-                seen.add(url)
+                seen.add(normalized)
                 results.append({
-                    "url":    url,
+                    "url":    normalized,
                     "title":  title,
                     "source": f"reddit_r_{sub}",
                 })
@@ -656,8 +689,9 @@ def discover_all() -> list[dict[str, Any]]:
     def _add(entries: list[dict[str, Any]]) -> None:
         for e in entries:
             url = e.get("url", "").strip()
-            if url and url not in seen_urls:
-                seen_urls.add(url)
+            normalized = _normalize_url(url)
+            if url and normalized not in seen_urls:
+                seen_urls.add(normalized)
                 combined.append(e)
 
     # ── Page sources ─────────────────────────────────────────────────────────

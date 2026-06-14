@@ -168,11 +168,17 @@ def _load_stats(db_path: str) -> dict[str, int]:
             "SELECT status, COUNT(*) AS cnt FROM sweepstakes GROUP BY status"
         ).fetchall()
         total = conn.execute("SELECT COUNT(*) AS cnt FROM sweepstakes").fetchone()
+        daily_due_row = conn.execute(
+            """SELECT COUNT(*) FROM sweepstakes
+                WHERE allows_daily=1 AND status='entered'
+                  AND (entered_at IS NULL OR DATE(entered_at) < DATE('now','localtime'))"""
+        ).fetchone()
         conn.close()
         stats: dict[str, int] = {}
         for row in rows:
             stats[row["status"]] = row["cnt"]
         stats["total"] = total["cnt"] if total else 0
+        stats["daily_due"] = daily_due_row[0] if daily_due_row else 0
         return stats
     except Exception:
         return {}
@@ -355,10 +361,11 @@ class SweepstakeGenieApp(ctk.CTk):
 
         self._stat_labels: dict[str, ctk.CTkLabel] = {}
         for stat_key, display in [
-            ("found",   "Found"),
-            ("entered", "Entered"),
-            ("skipped", "Skipped"),
-            ("captcha", "CAPTCHA"),
+            ("found",     "Found"),
+            ("entered",   "Entered"),
+            ("skipped",   "Skipped"),
+            ("captcha",   "CAPTCHA"),
+            ("daily_due", "Daily Due"),
         ]:
             f = ctk.CTkFrame(stats_frame, fg_color="transparent")
             f.pack(side="left", padx=16, pady=6)
@@ -390,6 +397,13 @@ class SweepstakeGenieApp(ctk.CTk):
         )
         self._btn_stop.pack(side="left", padx=6)
         self._btn_stop.configure(state="disabled")
+
+        self._btn_daily = ctk.CTkButton(
+            btn_frame, text="Enter Daily",
+            fg_color="#336633", hover_color="#448844",
+            command=self._start_daily_reentry,
+        )
+        self._btn_daily.pack(side="left", padx=6)
 
         # Status label
         self._run_status_lbl = ctk.CTkLabel(
@@ -423,6 +437,7 @@ class SweepstakeGenieApp(ctk.CTk):
         state_stop     = "normal"   if running else "disabled"
         self._btn_discover.configure(state=state_inactive)
         self._btn_run.configure(state=state_inactive)
+        self._btn_daily.configure(state=state_inactive)
         self._btn_stop.configure(state=state_stop)
         if running:
             self._progress.configure(mode="indeterminate")
@@ -524,10 +539,20 @@ class SweepstakeGenieApp(ctk.CTk):
 
                 # ── Entry phase ───────────────────────────────────────────
                 pending = db.get_pending()
+                daily   = db.get_due_for_reentry()
+                pending_urls = {sw["url"] for sw in pending}
+                for sw in daily:
+                    if sw["url"] not in pending_urls:
+                        pending.append(sw)
+
                 if not pending:
                     self._log_queue.put(f"[{_ts()}] No pending sweepstakes to enter.")
                     self._log_queue.put(("done", "Done"))
                     return
+
+                self._log_queue.put(
+                    f"[{_ts()}] {len(pending)} entries ({len(daily)} daily re-entries included)"
+                )
 
                 limit = config.max_entries_per_run
                 if len(pending) > limit:
@@ -536,9 +561,11 @@ class SweepstakeGenieApp(ctk.CTk):
                     )
                     pending = pending[:limit]
 
+                concurrency = getattr(config, 'concurrency', 3)
                 self._log_queue.put(("status", f"Entering {len(pending)} sweepstakes…"))
                 self._log_queue.put(
-                    f"[{_ts()}] Entering {len(pending)} sweepstakes…"
+                    f"[{_ts()}] Entering {len(pending)} sweepstakes "
+                    f"({concurrency} parallel workers)…"
                 )
 
                 counts: dict[str, int] = {
@@ -553,49 +580,54 @@ class SweepstakeGenieApp(ctk.CTk):
                 )
 
                 async def _run_entries() -> None:
-                    async with BrowserManager(headless=config.headless) as bm:
-                        page = await bm.new_page()
-                        for idx, sw in enumerate(pending, start=1):
-                            if self._stop_flag.is_set():
-                                self._log_queue.put(
-                                    f"[{_ts()}] Stopped by user after {idx - 1} entries."
-                                )
-                                break
+                    semaphore = asyncio.Semaphore(concurrency)
 
+                    async def _enter_one(idx: int, sw: dict) -> None:
+                        async with semaphore:
+                            if self._stop_flag.is_set():
+                                return
                             url   = sw["url"]
                             title = (sw.get("title") or url)[:70]
-
-                            result = await enter_sweepstake(page, url, config.profile, captcha_solver=captcha_solver)
-                            status = result["status"]
-
-                            if status == "entered":
-                                db.mark_entered(url)
-                                counts["entered"] += 1
-                                icon = "✓"
-                            elif status == "captcha":
-                                db.mark_captcha(url)
-                                counts["captcha"] += 1
-                                icon = "⚠"
-                            elif status == "no_form":
-                                db.mark_skipped(url, "no entry form detected")
-                                counts["no_form"] += 1
-                                icon = "–"
-                            else:
-                                msg = result.get("message", "unknown error")
-                                db.mark_error(url, msg)
-                                counts["error"] += 1
-                                icon = "✗"
-
-                            self._log_queue.put(
-                                f"[{_ts()}] {icon} [{idx}/{total}] {title}"
-                            )
-                            self._log_queue.put(("stats_refresh", None))
-
-                            pct = idx / total
-                            self._log_queue.put(("progress", pct))
-
+                            page  = await bm.new_page()
+                            try:
+                                result = await enter_sweepstake(
+                                    page, url, config.profile,
+                                    captcha_solver=captcha_solver
+                                )
+                                status = result["status"]
+                                if status == "entered":
+                                    db.mark_entered(url)
+                                    counts["entered"] += 1
+                                    icon = "✓"
+                                elif status == "captcha":
+                                    db.mark_captcha(url)
+                                    counts["captcha"] += 1
+                                    icon = "⚠"
+                                elif status == "no_form":
+                                    db.mark_skipped(url, "no entry form detected")
+                                    counts["no_form"] += 1
+                                    icon = "–"
+                                else:
+                                    msg = result.get("message", "unknown error")
+                                    db.mark_error(url, msg)
+                                    counts["error"] += 1
+                                    icon = "✗"
+                                self._log_queue.put(
+                                    f"[{_ts()}] {icon} [{idx}/{total}] {title}"
+                                )
+                                self._log_queue.put(("stats_refresh", None))
+                                self._log_queue.put(("progress", idx / total))
+                            finally:
+                                await page.close()
                             if config.delay_between_entries > 0:
                                 await asyncio.sleep(config.delay_between_entries)
+
+                    async with BrowserManager(headless=config.headless) as bm:
+                        tasks = [
+                            _enter_one(i + 1, sw)
+                            for i, sw in enumerate(pending)
+                        ]
+                        await asyncio.gather(*tasks, return_exceptions=True)
 
                 asyncio.run(_run_entries())
 
@@ -617,6 +649,129 @@ class SweepstakeGenieApp(ctk.CTk):
         self._stop_flag.set()
         self._set_run_status("Stopping…")
         self._append_log(f"[{_ts()}] Stop requested…")
+
+    def _start_daily_reentry(self) -> None:
+        """Enter only sweepstakes due for daily re-entry (no discover phase)."""
+        self._stop_flag.clear()
+        self._set_buttons_running(True)
+        self._set_run_status("Starting daily re-entries…")
+        self._append_log(f"[{_ts()}] Starting daily re-entry run…")
+
+        def task() -> None:
+            try:
+                from sweepstake_genie.config import Config
+                from sweepstake_genie.database import Database
+                from sweepstake_genie.browser import BrowserManager
+                from sweepstake_genie.form_filler import enter_sweepstake
+
+                try:
+                    config = Config(PROFILE_PATH)
+                except FileNotFoundError:
+                    self._log_queue.put(
+                        f"[{_ts()}] ERROR: profile.yaml not found. "
+                        "Please fill in your profile and click Save first."
+                    )
+                    self._log_queue.put(("done", "Error"))
+                    return
+
+                db = Database(self._db_path)
+                pending = db.get_due_for_reentry()
+
+                if not pending:
+                    self._log_queue.put(f"[{_ts()}] No daily re-entries due.")
+                    self._log_queue.put(("done", "Done"))
+                    return
+
+                limit = config.max_entries_per_run
+                if len(pending) > limit:
+                    self._log_queue.put(
+                        f"[{_ts()}] {len(pending)} daily entries; capping at {limit}."
+                    )
+                    pending = pending[:limit]
+
+                self._log_queue.put(
+                    f"[{_ts()}] Entering {len(pending)} daily re-entries…"
+                )
+                self._log_queue.put(("status", f"Entering {len(pending)} daily re-entries…"))
+
+                total = len(pending)
+                counts: dict[str, int] = {
+                    "entered": 0, "captcha": 0, "no_form": 0, "error": 0
+                }
+
+                from sweepstake_genie.captcha_solver import CaptchaSolver
+                captcha_solver = CaptchaSolver(
+                    service=config.captcha_service,
+                    api_key=config.captcha_api_key,
+                )
+
+                concurrency = getattr(config, 'concurrency', 3)
+
+                async def _run_daily() -> None:
+                    semaphore = asyncio.Semaphore(concurrency)
+
+                    async def _enter_one_daily(idx: int, sw: dict) -> None:
+                        async with semaphore:
+                            if self._stop_flag.is_set():
+                                return
+                            url   = sw["url"]
+                            title = (sw.get("title") or url)[:70]
+                            page  = await bm.new_page()
+                            try:
+                                result = await enter_sweepstake(
+                                    page, url, config.profile,
+                                    captcha_solver=captcha_solver
+                                )
+                                status = result["status"]
+                                if status == "entered":
+                                    db.mark_entered(url)
+                                    counts["entered"] += 1
+                                    icon = "✓"
+                                elif status == "captcha":
+                                    db.mark_captcha(url)
+                                    counts["captcha"] += 1
+                                    icon = "⚠"
+                                elif status == "no_form":
+                                    db.mark_skipped(url, "no entry form detected")
+                                    counts["no_form"] += 1
+                                    icon = "–"
+                                else:
+                                    msg = result.get("message", "unknown error")
+                                    db.mark_error(url, msg)
+                                    counts["error"] += 1
+                                    icon = "✗"
+                                self._log_queue.put(
+                                    f"[{_ts()}] {icon} [{idx}/{total}] {title}"
+                                )
+                                self._log_queue.put(("stats_refresh", None))
+                                self._log_queue.put(("progress", idx / total))
+                            finally:
+                                await page.close()
+                            if config.delay_between_entries > 0:
+                                await asyncio.sleep(config.delay_between_entries)
+
+                    async with BrowserManager(headless=config.headless) as bm:
+                        tasks = [
+                            _enter_one_daily(i + 1, sw)
+                            for i, sw in enumerate(pending)
+                        ]
+                        await asyncio.gather(*tasks, return_exceptions=True)
+
+                asyncio.run(_run_daily())
+
+                self._log_queue.put(
+                    f"[{_ts()}] Daily re-entry done — Entered: {counts['entered']}, "
+                    f"CAPTCHA: {counts['captcha']}, "
+                    f"No form: {counts['no_form']}, "
+                    f"Errors: {counts['error']}"
+                )
+                self._log_queue.put(("done", "Done"))
+
+            except Exception as exc:
+                self._log_queue.put(f"[{_ts()}] ERROR: {exc}")
+                self._log_queue.put(("done", "Error"))
+
+        self._running_thread = _run_in_thread(task)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Tab 3 — History
@@ -751,6 +906,23 @@ class SweepstakeGenieApp(ctk.CTk):
         self._max_entries_entry.grid(row=row, column=1, sticky="w", padx=(0, 10), pady=8)
         row += 1
 
+        # Concurrency
+        ctk.CTkLabel(parent, text="Parallel workers:", anchor="e", width=200).grid(
+            row=row, column=0, sticky="e", padx=(10, 4), pady=8
+        )
+        concurrency_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        concurrency_frame.grid(row=row, column=1, sticky="w", padx=(0, 10), pady=8)
+        self._concurrency_var = ctk.IntVar(value=3)
+        self._concurrency_slider = ctk.CTkSlider(
+            concurrency_frame, from_=1, to=10, number_of_steps=9,
+            variable=self._concurrency_var, width=200,
+            command=lambda v: self._concurrency_lbl.configure(text=str(int(v)))
+        )
+        self._concurrency_slider.pack(side="left")
+        self._concurrency_lbl = ctk.CTkLabel(concurrency_frame, text="3", width=30)
+        self._concurrency_lbl.pack(side="left", padx=6)
+        row += 1
+
         # Database path
         ctk.CTkLabel(parent, text="Database path:", anchor="e", width=200).grid(
             row=row, column=0, sticky="e", padx=(10, 4), pady=8
@@ -824,10 +996,15 @@ class SweepstakeGenieApp(ctk.CTk):
             max_entries = int(self._max_entries_var.get())
         except Exception:
             max_entries = 50
+        try:
+            concurrency = int(self._concurrency_var.get())
+        except Exception:
+            concurrency = 3
         return {
             "headless": bool(self._headless_var.get()),
             "delay_between_entries": delay,
             "max_entries_per_run": max_entries,
+            "concurrency": concurrency,
             "skip_captcha": True,
             "log_file": self._log_file_var.get() or "entries.log",
             "database": self._db_path_var.get() or DEFAULT_DB,
@@ -846,6 +1023,9 @@ class SweepstakeGenieApp(ctk.CTk):
                 self._delay_lbl.configure(text=str(v))
             if "max_entries_per_run" in settings:
                 self._max_entries_var.set(str(settings["max_entries_per_run"]))
+            if "concurrency" in settings:
+                self._concurrency_var.set(int(settings["concurrency"]))
+                self._concurrency_lbl.configure(text=str(int(settings["concurrency"])))
             if "database" in settings:
                 self._db_path_var.set(str(settings["database"]))
                 self._db_path = str(settings["database"])
@@ -961,6 +1141,7 @@ class SweepstakeGenieApp(ctk.CTk):
         skipped = stats.get("skipped", 0) + stats.get("no_form", 0)
         self._stat_labels["skipped"].configure(text=str(skipped))
         self._stat_labels["captcha"].configure(text=str(stats.get("captcha", 0)))
+        self._stat_labels["daily_due"].configure(text=str(stats.get("daily_due", 0)))
 
     # ─────────────────────────────────────────────────────────────────────────
     # Playwright browser check on startup
