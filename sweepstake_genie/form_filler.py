@@ -242,6 +242,110 @@ async def _has_captcha(page: Page) -> bool:
     return False
 
 
+async def _detect_captcha(page: Page) -> tuple[str | None, str | None]:
+    """
+    Detect visible CAPTCHA and return (type, sitekey).
+    type is 'recaptcha', 'hcaptcha', or None.
+    sitekey is the data-sitekey value or None.
+    """
+    # reCAPTCHA
+    for sel in [".g-recaptcha", "div[data-sitekey]", "iframe[src*='recaptcha']"]:
+        try:
+            el = await page.query_selector(sel)
+            if el and await el.is_visible():
+                sitekey = await el.get_attribute("data-sitekey")
+                if not sitekey:
+                    # Try to extract from iframe src
+                    src = await el.get_attribute("src") or ""
+                    if "k=" in src:
+                        sitekey = src.split("k=")[1].split("&")[0]
+                return "recaptcha", sitekey
+        except Exception:
+            pass
+
+    # Also check for recaptcha via JavaScript
+    try:
+        sitekey = await page.evaluate("""
+            () => {
+                const el = document.querySelector('.g-recaptcha, [data-sitekey]');
+                return el ? el.getAttribute('data-sitekey') : null;
+            }
+        """)
+        if sitekey:
+            return "recaptcha", sitekey
+    except Exception:
+        pass
+
+    # hCaptcha
+    for sel in [".h-captcha", "[data-hcaptcha-widget-id]", "iframe[src*='hcaptcha']"]:
+        try:
+            el = await page.query_selector(sel)
+            if el and await el.is_visible():
+                sitekey = await el.get_attribute("data-sitekey")
+                return "hcaptcha", sitekey
+        except Exception:
+            pass
+
+    # Cloudflare Turnstile
+    for sel in [".cf-turnstile", "iframe[src*='challenges.cloudflare']"]:
+        try:
+            el = await page.query_selector(sel)
+            if el and await el.is_visible():
+                sitekey = await el.get_attribute("data-sitekey")
+                return "recaptcha", sitekey  # treat as recaptcha-compatible
+        except Exception:
+            pass
+
+    return None, None
+
+
+async def _inject_captcha_token(page: Page, captcha_type: str, token: str) -> None:
+    """Inject a solved CAPTCHA token into the page and trigger callbacks."""
+    # Escape token for JS string (tokens are alphanumeric so minimal risk)
+    safe_token = token.replace("'", "\\'").replace("\n", "")
+
+    if captcha_type == "recaptcha":
+        await page.evaluate(f"""
+            (function() {{
+                // Set the response textarea
+                var resp = document.getElementById('g-recaptcha-response');
+                if (resp) resp.innerHTML = '{safe_token}';
+                document.querySelectorAll('.g-recaptcha-response').forEach(
+                    function(el) {{ el.innerHTML = '{safe_token}'; }}
+                );
+                // Fire the grecaptcha callback if registered
+                try {{
+                    var cfg = window.___grecaptcha_cfg;
+                    if (cfg && cfg.clients) {{
+                        Object.values(cfg.clients).forEach(function(c) {{
+                            if (c && c.callback) c.callback('{safe_token}');
+                        }});
+                    }}
+                }} catch(e) {{}}
+            }})();
+        """)
+    elif captcha_type == "hcaptcha":
+        await page.evaluate(f"""
+            (function() {{
+                var sel = 'textarea[name="h-captcha-response"], ' +
+                          'textarea[name="g-recaptcha-response"]';
+                document.querySelectorAll(sel).forEach(
+                    function(el) {{ el.value = '{safe_token}'; }}
+                );
+                // Fire hcaptcha callback
+                try {{
+                    if (window.hcaptcha) {{
+                        Object.values(window.hcaptcha._state || {{}}).forEach(function(s) {{
+                            if (s && s.response && s.onSuccess) s.onSuccess('{safe_token}');
+                        }});
+                    }}
+                }} catch(e) {{}}
+            }})();
+        """)
+
+    await asyncio.sleep(0.5)
+
+
 async def _bypass_age_gate(page: Page, profile: dict) -> bool:
     """Try to click through age verification gate. Returns True if one was found."""
     # First try clicking a button directly
@@ -480,7 +584,7 @@ async def _try_next_step(page: Page) -> bool:
 
 # ── Main entry function ───────────────────────────────────────────────────────
 
-async def fill_and_submit(page: Page, profile: dict[str, str]) -> dict[str, Any]:
+async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=None) -> dict[str, Any]:
     """
     Attempt to fill and submit the entry form on the current page.
 
@@ -490,6 +594,8 @@ async def fill_and_submit(page: Page, profile: dict[str, str]) -> dict[str, Any]
         A Playwright Page already navigated to the sweepstake URL.
     profile:
         User profile dict from config (keys match _FIELD_SELECTORS above).
+    captcha_solver:
+        Optional CaptchaSolver instance for auto-solving CAPTCHAs.
 
     Returns
     -------
@@ -515,10 +621,26 @@ async def fill_and_submit(page: Page, profile: dict[str, str]) -> dict[str, Any]
     # ── Wait for dynamic form to load ─────────────────────────────────────────
     await _wait_for_form(page)
 
-    # ── CAPTCHA check ─────────────────────────────────────────────────────────
-    if await _has_captcha(page):
-        logger.info("CAPTCHA detected on %s", page.url)
-        return {"status": "captcha"}
+    # ── CAPTCHA detection & solving ───────────────────────────────────────────
+    captcha_type, sitekey = await _detect_captcha(page)
+    if captcha_type:
+        if captcha_solver and captcha_solver.enabled and sitekey:
+            logger.info("Attempting to solve %s (sitekey: %s…)", captcha_type, (sitekey or "")[:8])
+            if captcha_type == "hcaptcha":
+                token = await asyncio.get_event_loop().run_in_executor(
+                    None, captcha_solver.solve_hcaptcha, sitekey, page.url
+                )
+            else:
+                token = await asyncio.get_event_loop().run_in_executor(
+                    None, captcha_solver.solve_recaptcha, sitekey, page.url
+                )
+            if token:
+                await _inject_captcha_token(page, captcha_type, token)
+                # Don't return — continue to fill and submit
+            else:
+                return {"status": "captcha", "detail": "solver returned no token"}
+        else:
+            return {"status": "captcha"}
 
     # ── Multi-step form loop (max 4 steps) ────────────────────────────────────
     total_fields_filled = 0
@@ -570,7 +692,7 @@ async def fill_and_submit(page: Page, profile: dict[str, str]) -> dict[str, Any]
     return {"status": "entered"}
 
 
-async def enter_sweepstake(page: Page, url: str, profile: dict[str, str]) -> dict[str, Any]:
+async def enter_sweepstake(page: Page, url: str, profile: dict[str, str], captcha_solver=None) -> dict[str, Any]:
     """
     Navigate to *url* and attempt entry.  Wraps :func:`fill_and_submit` with
     navigation error handling.
@@ -582,4 +704,4 @@ async def enter_sweepstake(page: Page, url: str, profile: dict[str, str]) -> dic
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
 
-    return await fill_and_submit(page, profile)
+    return await fill_and_submit(page, profile, captcha_solver=captcha_solver)

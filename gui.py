@@ -546,6 +546,12 @@ class SweepstakeGenieApp(ctk.CTk):
                 }
                 total = len(pending)
 
+                from sweepstake_genie.captcha_solver import CaptchaSolver
+                captcha_solver = CaptchaSolver(
+                    service=config.captcha_service,
+                    api_key=config.captcha_api_key,
+                )
+
                 async def _run_entries() -> None:
                     async with BrowserManager(headless=config.headless) as bm:
                         page = await bm.new_page()
@@ -559,7 +565,7 @@ class SweepstakeGenieApp(ctk.CTk):
                             url   = sw["url"]
                             title = (sw.get("title") or url)[:70]
 
-                            result = await enter_sweepstake(page, url, config.profile)
+                            result = await enter_sweepstake(page, url, config.profile, captcha_solver=captcha_solver)
                             status = result["status"]
 
                             if status == "entered":
@@ -767,6 +773,39 @@ class SweepstakeGenieApp(ctk.CTk):
         self._log_file_entry.grid(row=row, column=1, sticky="w", padx=(0, 10), pady=8)
         row += 1
 
+        # ── CAPTCHA settings ──────────────────────────────────────────────────
+
+        ctk.CTkLabel(parent, text="CAPTCHA Service:", anchor="e", width=200).grid(
+            row=row, column=0, sticky="e", padx=(10, 4), pady=8
+        )
+        self._captcha_service_var = ctk.CTkComboBox(
+            parent, values=["none", "2captcha", "capsolver"], width=200
+        )
+        self._captcha_service_var.set("none")
+        self._captcha_service_var.grid(row=row, column=1, sticky="w", padx=(0, 10), pady=8)
+        row += 1
+
+        ctk.CTkLabel(parent, text="CAPTCHA API Key:", anchor="e", width=200).grid(
+            row=row, column=0, sticky="e", padx=(10, 4), pady=8
+        )
+        self._captcha_api_key_var = ctk.CTkEntry(parent, show="*", width=340)
+        self._captcha_api_key_var.grid(row=row, column=1, sticky="w", padx=(0, 10), pady=8)
+        row += 1
+
+        # Balance check
+        ctk.CTkLabel(parent, text="", width=200).grid(
+            row=row, column=0, sticky="e", padx=(10, 4), pady=4
+        )
+        balance_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        balance_frame.grid(row=row, column=1, sticky="w", padx=(0, 10), pady=4)
+        ctk.CTkButton(
+            balance_frame, text="Check Balance", width=130,
+            command=self._check_captcha_balance
+        ).pack(side="left", padx=(0, 8))
+        self._captcha_balance_lbl = ctk.CTkLabel(balance_frame, text="")
+        self._captcha_balance_lbl.pack(side="left")
+        row += 1
+
         # Save button
         save_frame = ctk.CTkFrame(parent, fg_color="transparent")
         save_frame.grid(row=row, column=0, columnspan=2, pady=14)
@@ -792,6 +831,8 @@ class SweepstakeGenieApp(ctk.CTk):
             "skip_captcha": True,
             "log_file": self._log_file_var.get() or "entries.log",
             "database": self._db_path_var.get() or DEFAULT_DB,
+            "captcha_service": self._captcha_service_var.get(),
+            "captcha_api_key": self._captcha_api_key_var.get(),
         }
 
     def _sync_settings_from_dict(self, settings: dict[str, Any]) -> None:
@@ -810,8 +851,46 @@ class SweepstakeGenieApp(ctk.CTk):
                 self._db_path = str(settings["database"])
             if "log_file" in settings:
                 self._log_file_var.set(str(settings["log_file"]))
+            if "captcha_service" in settings:
+                self._captcha_service_var.set(str(settings["captcha_service"]))
+            if "captcha_api_key" in settings:
+                self._captcha_api_key_var.delete(0, "end")
+                self._captcha_api_key_var.insert(0, str(settings["captcha_api_key"]))
         except Exception:
             pass  # widgets may not exist yet on first call
+
+    def _check_captcha_balance(self) -> None:
+        """Check the CAPTCHA service balance in a background thread and update the label."""
+        service = self._captcha_service_var.get()
+        api_key = self._captcha_api_key_var.get()
+
+        if service == "none" or not api_key:
+            self._captcha_balance_lbl.configure(
+                text="Select a service and enter an API key first.", text_color="#ffaa44"
+            )
+            return
+
+        self._captcha_balance_lbl.configure(text="Checking…", text_color="#aaaaaa")
+
+        def _do_check() -> None:
+            try:
+                from sweepstake_genie.captcha_solver import CaptchaSolver
+                solver = CaptchaSolver(service=service, api_key=api_key)
+                balance = solver.check_balance()
+                if balance is not None:
+                    self.after(0, lambda: self._captcha_balance_lbl.configure(
+                        text=f"Balance: ${balance:.4f}", text_color="#55ff55"
+                    ))
+                else:
+                    self.after(0, lambda: self._captcha_balance_lbl.configure(
+                        text="Balance check failed — check service/key.", text_color="#ff5555"
+                    ))
+            except Exception as exc:
+                self.after(0, lambda: self._captcha_balance_lbl.configure(
+                    text=f"Error: {exc}", text_color="#ff5555"
+                ))
+
+        _run_in_thread(_do_check)
 
     def _save_settings(self) -> None:
         settings = self._collect_settings_dict()

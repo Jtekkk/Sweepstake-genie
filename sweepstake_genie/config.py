@@ -20,6 +20,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "skip_captcha": True,
     "log_file": "entries.log",
     "database": "sweepstakes.db",
+    "captcha_service": "none",
+    "captcha_api_key": "",
 }
 
 
@@ -83,6 +85,14 @@ class Config:
     @property
     def database(self) -> str:
         return str(self.settings.get("database", "sweepstakes.db"))
+
+    @property
+    def captcha_service(self) -> str:
+        return str(self.settings.get("captcha_service", "none"))
+
+    @property
+    def captcha_api_key(self) -> str:
+        return str(self.settings.get("captcha_api_key", ""))
 
     # ── Display ───────────────────────────────────────────────────────────
 
