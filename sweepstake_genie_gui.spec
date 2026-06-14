@@ -1,14 +1,23 @@
 # sweepstake_genie_gui.spec
 block_cipher = None
 
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+
+# Bundle playwright's Node.js driver + all its package data.
+# Without this the frozen exe cannot launch any browser and Windows
+# may show a "Python not found" dialog when playwright tries to locate
+# its runtime via python.exe.
+playwright_datas   = collect_data_files('playwright', include_py_files=False)
+playwright_binaries = collect_dynamic_libs('playwright')
+
 a = Analysis(
     ['gui.py'],
     pathex=[],
-    binaries=[],
+    binaries=playwright_binaries,
     datas=[
         ('profile.example.yaml', '.'),
         ('sweepstake_genie', 'sweepstake_genie'),
-    ],
+    ] + playwright_datas,
     hiddenimports=[
         'customtkinter',
         'PIL',
@@ -17,11 +26,12 @@ a = Analysis(
         'playwright',
         'playwright.sync_api',
         'playwright.async_api',
+        'playwright._impl._driver',
         '_pyinstaller_hooks_contrib',
     ],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['runtime_hooks/playwright_rt_hook.py'],
     excludes=[],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -45,7 +55,7 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,   # no console window
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

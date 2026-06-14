@@ -18,6 +18,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+# Suppress runtime warnings — in a windowed exe they surface as Windows dialogs.
+import warnings
+warnings.filterwarnings("ignore")
+
 # Must be called before any multiprocessing usage in a PyInstaller frozen exe.
 multiprocessing.freeze_support()
 
