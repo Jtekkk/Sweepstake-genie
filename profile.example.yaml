@@ -1,0 +1,24 @@
+profile:
+  first_name: "Jane"
+  last_name: "Doe"
+  email: "janedoe@example.com"
+  email_confirm: "janedoe@example.com"
+  phone: "555-555-5555"
+  address1: "123 Main St"
+  address2: ""
+  city: "Springfield"
+  state: "IL"
+  zip: "62701"
+  country: "US"
+  dob_month: "01"
+  dob_day: "15"
+  dob_year: "1990"
+  age: "34"
+
+settings:
+  headless: true           # run browser without GUI
+  delay_between_entries: 3 # seconds between sweepstake entries
+  max_entries_per_run: 50  # cap per session
+  skip_captcha: true       # skip forms with captcha, log them instead
+  log_file: "entries.log"
+  database: "sweepstakes.db"
