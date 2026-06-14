@@ -16,6 +16,7 @@ import sys
 
 import click
 from rich.console import Console
+from rich.pretty import pprint
 
 from sweepstake_genie.config import load_config
 from sweepstake_genie.database import Database
@@ -114,6 +115,24 @@ def status(ctx: click.Context) -> None:
 
     db = Database(config.database)
     run_status(db)
+
+
+# ── config ────────────────────────────────────────────────────────────────────
+
+@cli.command("config")
+@click.pass_context
+def show_config(ctx: click.Context) -> None:
+    """Display the current profile and settings (email is redacted)."""
+    profile_path = ctx.obj["profile_path"]
+    try:
+        config = load_config(profile_path)
+    except (FileNotFoundError, ValueError) as exc:
+        console.print(f"[red]Config error:[/red] {exc}")
+        sys.exit(1)
+
+    console.print("[bold cyan]Current configuration[/bold cyan] "
+                  f"[dim](loaded from {profile_path})[/dim]")
+    pprint(config.display(), console=console)
 
 
 # ── entrypoint ────────────────────────────────────────────────────────────────
