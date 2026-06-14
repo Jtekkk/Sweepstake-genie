@@ -441,10 +441,14 @@ class SweepstakeGenieApp(ctk.CTk):
         def task() -> None:
             try:
                 from sweepstake_genie.database import Database
-                from sweepstake_genie.scraper import discover_all
+                from sweepstake_genie.scraper import discover_all, list_sources
 
                 db = Database(self._db_path)
-                self._log_queue.put(f"[{_ts()}] Scraping sweepstake sources…")
+                sources = list_sources()
+                self._log_queue.put(
+                    f"[{_ts()}] Scraping {len(sources)} sources: "
+                    + ", ".join(sources)
+                )
                 sweepstakes = discover_all()
                 new_count = 0
                 for sw in sweepstakes:
@@ -476,7 +480,7 @@ class SweepstakeGenieApp(ctk.CTk):
             try:
                 from sweepstake_genie.config import Config
                 from sweepstake_genie.database import Database
-                from sweepstake_genie.scraper import discover_all
+                from sweepstake_genie.scraper import discover_all, list_sources
                 from sweepstake_genie.browser import BrowserManager
                 from sweepstake_genie.form_filler import enter_sweepstake
 
@@ -495,7 +499,11 @@ class SweepstakeGenieApp(ctk.CTk):
 
                 # ── Discover phase ────────────────────────────────────────
                 self._log_queue.put(("status", "Discovering…"))
-                self._log_queue.put(f"[{_ts()}] Scraping sweepstake sources…")
+                sources = list_sources()
+                self._log_queue.put(
+                    f"[{_ts()}] Scraping {len(sources)} sources: "
+                    + ", ".join(sources)
+                )
                 sweepstakes = discover_all()
                 new_count = 0
                 for sw in sweepstakes:
