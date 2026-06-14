@@ -10,6 +10,7 @@ Usage::
 
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING
 
 from playwright.async_api import (
@@ -70,21 +71,23 @@ class BrowserManager:
 
     async def __aenter__(self) -> "BrowserManager":
         self._playwright = await async_playwright().start()
+        _args = [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-features=IsolateOrigins,site-per-process",
+            "--disable-site-isolation-trials",
+            "--disable-web-security",
+            "--allow-running-insecure-content",
+            "--disable-extensions",
+            "--mute-audio",
+        ]
+        if sys.platform != "win32":
+            # These flags bypass the Linux sandbox — meaningless/harmful on Windows
+            _args += ["--no-sandbox", "--disable-setuid-sandbox"]
         self._browser = await self._playwright.chromium.launch(
             headless=self.headless,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-features=IsolateOrigins,site-per-process",
-                "--disable-site-isolation-trials",
-                "--disable-web-security",
-                "--allow-running-insecure-content",
-                "--disable-extensions",
-                "--mute-audio",
-            ],
+            args=_args,
         )
         self._context = await self._browser.new_context(
             viewport=_VIEWPORT,

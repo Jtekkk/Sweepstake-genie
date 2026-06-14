@@ -71,8 +71,9 @@ async def _enter_worker(
             return
         url   = sw["url"]
         title = (sw.get("title") or url)[:70]
-        page  = await bm.new_page()
+        page  = None
         try:
+            page = await bm.new_page()
             result = await enter_sweepstake(page, url, config.profile, captcha_solver)
             status = result["status"]
             if status == "entered":
@@ -93,8 +94,16 @@ async def _enter_worker(
                 db.mark_error(url, result.get("message", "unknown"))
                 icon = "[red]✗[/red]"
             console.print(f"  {icon} [{idx}/{total}] {title}")
+        except Exception as exc:
+            db.mark_error(url, str(exc))
+            logger.error("[%d/%d] %s — %s", idx, total, title, exc)
+            console.print(f"  [red]✗[/red] [{idx}/{total}] {title} — {exc}")
         finally:
-            await page.close()
+            if page is not None:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
 
         if config.delay_between_entries > 0:
             await asyncio.sleep(config.delay_between_entries)
@@ -143,7 +152,10 @@ async def _run_enter_async(config: Config, db: Database) -> None:
                           semaphore, stop_event)
             for i, sw in enumerate(all_entries)
         ]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, BaseException):
+                logger.error("Worker task raised unhandled exception: %s", r)
 
     stats = db.get_stats()
     console.print()

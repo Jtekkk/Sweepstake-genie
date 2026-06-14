@@ -166,8 +166,11 @@ class CaptchaSolver:
                 )
                 data = resp.json()
                 if data.get("status") == "ready":
-                    token = data.get("solution", {}).get("gRecaptchaResponse") or \
-                            data.get("solution", {}).get("userAgent")
+                    solution = data.get("solution", {})
+                    token = solution.get("gRecaptchaResponse")
+                    if not token:
+                        logger.warning("CapSolver returned no token in solution: %s", solution)
+                        return None
                     logger.info("CapSolver solved after %d polls", attempt + 1)
                     return token
                 if data.get("errorId", 0) != 0:

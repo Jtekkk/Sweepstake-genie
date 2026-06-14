@@ -8,6 +8,7 @@ Run with:
 from __future__ import annotations
 
 import asyncio
+import logging
 import multiprocessing
 import os
 import queue
@@ -645,7 +646,10 @@ class SweepstakeGenieApp(ctk.CTk):
                             _enter_one(i + 1, sw)
                             for i, sw in enumerate(pending)
                         ]
-                        await asyncio.gather(*tasks, return_exceptions=True)
+                        _results = await asyncio.gather(*tasks, return_exceptions=True)
+                        for _r in _results:
+                            if isinstance(_r, BaseException):
+                                logging.getLogger(__name__).error("Worker task failed: %s", _r)
 
                 asyncio.run(_run_entries())
 
@@ -794,7 +798,10 @@ class SweepstakeGenieApp(ctk.CTk):
                             _enter_one_daily(i + 1, sw)
                             for i, sw in enumerate(pending)
                         ]
-                        await asyncio.gather(*tasks, return_exceptions=True)
+                        _results = await asyncio.gather(*tasks, return_exceptions=True)
+                        for _r in _results:
+                            if isinstance(_r, BaseException):
+                                logging.getLogger(__name__).error("Worker task failed: %s", _r)
 
                 asyncio.run(_run_daily())
 
