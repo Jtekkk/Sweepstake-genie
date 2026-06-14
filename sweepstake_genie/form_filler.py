@@ -713,6 +713,505 @@ async def _enter_shortstack(page: Page, profile: dict[str, str]) -> dict[str, An
     return None
 
 
+async def _dismiss_gdpr_consent(page: Page) -> None:
+    """Click 'Accept All' / 'Accept Cookies' banners before interacting with forms."""
+    _CONSENT_SELECTORS = [
+        # OneTrust
+        "#onetrust-accept-btn-handler",
+        ".onetrust-accept-btn-handler",
+        "#accept-all-cookies",
+        # Cookiebot
+        "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+        # CookieYes / LegalMonster
+        ".cookie-accept-all",
+        ".cky-btn-accept",
+        # Generic patterns
+        "button[id*='accept'][id*='cookie' i]",
+        "button[class*='accept'][class*='cookie' i]",
+        "button[aria-label*='accept all' i]",
+        "button[aria-label*='accept cookies' i]",
+        # Text-matched buttons (broad — try last)
+        "button:has-text('Accept All')",
+        "button:has-text('Accept Cookies')",
+        "button:has-text('Allow All')",
+        "button:has-text('I Accept')",
+        "button:has-text('Agree')",
+    ]
+    for sel in _CONSENT_SELECTORS:
+        try:
+            el = await page.query_selector(sel)
+            if el and await el.is_visible():
+                await el.click()
+                await asyncio.sleep(0.6)
+                return
+        except Exception:
+            pass
+
+
+async def _enter_typeform(page: Page, profile: dict[str, str]) -> dict[str, Any] | None:
+    """Handle Typeform-hosted and embedded Typeform surveys/giveaways."""
+    is_tf = (
+        "typeform.com" in page.url
+        or await page.query_selector("iframe[src*='typeform.com'], [data-tf-widget]") is not None
+    )
+    if not is_tf:
+        return None
+    try:
+        iframe_el = await page.query_selector("iframe[src*='typeform.com']")
+        target = (await iframe_el.content_frame()) if iframe_el else page
+        if target is None:
+            return None
+
+        # Typeform shows one question at a time; iterate up to 20 questions
+        for _ in range(20):
+            await asyncio.sleep(0.8)
+            filled = False
+            # Email question
+            email_input = await target.query_selector("input[type='email']")
+            if email_input and await email_input.is_visible():
+                await email_input.fill(profile.get("email", ""))
+                filled = True
+            # Short/long text questions — map placeholder/aria-label to profile keys
+            for inp in await target.query_selector_all("input[type='text'], textarea"):
+                if not await inp.is_visible():
+                    continue
+                placeholder = (await inp.get_attribute("placeholder") or "").lower()
+                aria = (await inp.get_attribute("aria-label") or "").lower()
+                hint = placeholder + " " + aria
+                val = ""
+                if "first" in hint:
+                    val = profile.get("first_name", "")
+                elif "last" in hint:
+                    val = profile.get("last_name", "")
+                elif "name" in hint:
+                    val = f"{profile.get('first_name','')} {profile.get('last_name','')}".strip()
+                elif "phone" in hint or "mobile" in hint:
+                    val = profile.get("phone", "")
+                elif "zip" in hint or "postal" in hint:
+                    val = profile.get("zip", "")
+                elif "city" in hint:
+                    val = profile.get("city", "")
+                if val:
+                    await inp.fill(val)
+                    filled = True
+            # Press Enter to advance to next question
+            await target.keyboard.press("Enter")
+            await asyncio.sleep(0.6)
+            # Detect thank-you / success screen
+            content = (await target.text_content("body") or "").lower()
+            if any(p in content for p in _SUCCESS_TEXT_PATTERNS):
+                return {"status": "entered", "platform": "typeform"}
+            # Check for a Submit button (final question)
+            submit = await target.query_selector("button[type='submit'], [data-qa='submit-button']")
+            if submit and await submit.is_visible():
+                await submit.click()
+                await asyncio.sleep(2)
+                return {"status": "entered", "platform": "typeform"}
+            if not filled:
+                break
+    except Exception as exc:
+        logger.debug("Typeform handler error: %s", exc)
+    return None
+
+
+async def _enter_jotform(page: Page, profile: dict[str, str]) -> dict[str, Any] | None:
+    """Handle JotForm embedded forms."""
+    is_jf = (
+        "jotform.com" in page.url
+        or await page.query_selector("iframe[src*='jotform.com'], form[action*='jotform.com']") is not None
+    )
+    if not is_jf:
+        return None
+    try:
+        iframe_el = await page.query_selector("iframe[src*='jotform.com']")
+        target = (await iframe_el.content_frame()) if iframe_el else page
+        if target is None:
+            return None
+        # Fill name widgets
+        for inp in await target.query_selector_all("input[id*='first' i], input[name*='first' i]"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("first_name", ""))
+        for inp in await target.query_selector_all("input[id*='last' i], input[name*='last' i]"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("last_name", ""))
+        for inp in await target.query_selector_all("input[type='email']"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("email", ""))
+        for inp in await target.query_selector_all("input[id*='phone' i], input[name*='phone' i]"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("phone", ""))
+        for inp in await target.query_selector_all("input[id*='zip' i], input[name*='postal' i]"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("zip", ""))
+        # Terms checkbox
+        for cb in await target.query_selector_all("input[type='checkbox']"):
+            if await cb.is_visible() and not await cb.is_checked():
+                await cb.check()
+        submit = await target.query_selector("button[type='submit'], input[type='submit'], .jotform-submit-button")
+        if submit and await submit.is_visible():
+            await submit.click()
+            await asyncio.sleep(2)
+            return {"status": "entered", "platform": "jotform"}
+    except Exception as exc:
+        logger.debug("JotForm handler error: %s", exc)
+    return None
+
+
+async def _enter_sweepwidget(page: Page, profile: dict[str, str]) -> dict[str, Any] | None:
+    """Handle SweepWidget embedded giveaway widgets."""
+    is_sw = (
+        "sweepwidget.com" in page.url
+        or await page.query_selector(
+            "iframe[src*='sweepwidget.com'], div[id*='sw-'], script[src*='sweepwidget.com']"
+        ) is not None
+    )
+    if not is_sw:
+        return None
+    try:
+        iframe_el = await page.query_selector("iframe[src*='sweepwidget.com']")
+        target = (await iframe_el.content_frame()) if iframe_el else page
+        if target is None:
+            return None
+        email = await target.query_selector("input[type='email'], input[name*='email' i]")
+        if email and await email.is_visible():
+            await email.fill(profile.get("email", ""))
+        name = await target.query_selector("input[name*='name' i]")
+        if name and await name.is_visible():
+            await name.fill(f"{profile.get('first_name','')} {profile.get('last_name','')}".strip())
+        submit = await target.query_selector("button[type='submit'], .sw-enter-btn, input[type='submit']")
+        if submit and await submit.is_visible():
+            await submit.click()
+            await asyncio.sleep(2)
+            return {"status": "entered", "platform": "sweepwidget"}
+    except Exception as exc:
+        logger.debug("SweepWidget handler error: %s", exc)
+    return None
+
+
+async def _enter_wishpond(page: Page, profile: dict[str, str]) -> dict[str, Any] | None:
+    """Handle Wishpond contest/giveaway landing pages and embeds."""
+    is_wp = (
+        "wishpond.com" in page.url
+        or await page.query_selector(
+            "iframe[src*='wishpond.com'], [data-wishpond], script[src*='wishpond.com']"
+        ) is not None
+    )
+    if not is_wp:
+        return None
+    try:
+        iframe_el = await page.query_selector("iframe[src*='wishpond.com']")
+        target = (await iframe_el.content_frame()) if iframe_el else page
+        if target is None:
+            return None
+        for inp in await target.query_selector_all("input[type='email']"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("email", ""))
+        for inp in await target.query_selector_all("input[name*='first' i]"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("first_name", ""))
+        for inp in await target.query_selector_all("input[name*='last' i]"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("last_name", ""))
+        submit = await target.query_selector(
+            "button[type='submit'], input[type='submit'], .wishpond-submit, .wp-enter-btn"
+        )
+        if submit and await submit.is_visible():
+            await submit.click()
+            await asyncio.sleep(2)
+            return {"status": "entered", "platform": "wishpond"}
+    except Exception as exc:
+        logger.debug("Wishpond handler error: %s", exc)
+    return None
+
+
+async def _enter_mailchimp(page: Page, profile: dict[str, str]) -> dict[str, Any] | None:
+    """Handle Mailchimp embedded subscribe forms."""
+    is_mc = (
+        "list-manage.com" in page.url
+        or "mailchimp.com" in page.url
+        or await page.query_selector(
+            "form#mc-embedded-subscribe-form, form[action*='list-manage.com'], form[action*='mailchimp.com']"
+        ) is not None
+    )
+    if not is_mc:
+        return None
+    try:
+        for inp in await page.query_selector_all("input[type='email'], input[name*='EMAIL' i]"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("email", ""))
+        for inp in await page.query_selector_all("input[name='FNAME'], input[name*='first' i]"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("first_name", ""))
+        for inp in await page.query_selector_all("input[name='LNAME'], input[name*='last' i]"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("last_name", ""))
+        submit = await page.query_selector(
+            "input#mc-embedded-subscribe, button[type='submit'], input[type='submit']"
+        )
+        if submit and await submit.is_visible():
+            await submit.click()
+            await asyncio.sleep(2)
+            return {"status": "entered", "platform": "mailchimp"}
+    except Exception as exc:
+        logger.debug("Mailchimp handler error: %s", exc)
+    return None
+
+
+async def _enter_wordpress_forms(page: Page, profile: dict[str, str]) -> dict[str, Any] | None:
+    """Handle Gravity Forms, WPForms, Contact Form 7, and Ninja Forms."""
+    _WP_FORM_SELECTORS = {
+        "gravityforms": ".gform_wrapper form, #gform_wrapper",
+        "wpforms": ".wpforms-form",
+        "cf7": ".wpcf7-form",
+        "ninjaforms": "form[id^='nf-form-'], .nf-form-cont",
+        "formidable": ".frm_forms form",
+        "caldera": ".caldera-forms-form",
+    }
+    detected_form = None
+    detected_platform = None
+    for platform, sel in _WP_FORM_SELECTORS.items():
+        el = await page.query_selector(sel)
+        if el and await el.is_visible():
+            detected_form = el
+            detected_platform = platform
+            break
+    if detected_form is None:
+        return None
+    try:
+        # Email
+        for inp in await page.query_selector_all("input[type='email']"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("email", ""))
+        # First name
+        for inp in await page.query_selector_all(
+            "input[name*='first' i], input[id*='first' i], input[class*='first' i]"
+        ):
+            if await inp.is_visible():
+                await inp.fill(profile.get("first_name", ""))
+        # Last name
+        for inp in await page.query_selector_all(
+            "input[name*='last' i], input[id*='last' i], input[class*='last' i]"
+        ):
+            if await inp.is_visible():
+                await inp.fill(profile.get("last_name", ""))
+        # Phone
+        for inp in await page.query_selector_all("input[type='tel'], input[name*='phone' i]"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("phone", ""))
+        # ZIP
+        for inp in await page.query_selector_all("input[name*='zip' i], input[name*='postal' i]"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("zip", ""))
+        # Terms / consent checkboxes
+        for cb in await page.query_selector_all("input[type='checkbox']"):
+            if await cb.is_visible() and not await cb.is_checked():
+                await cb.check()
+        # Submit
+        submit = await page.query_selector(
+            ".gform_button, .wpforms-submit, input.wpcf7-submit, .nf-form-submit input[type='submit'], "
+            "button[type='submit'], input[type='submit']"
+        )
+        if submit and await submit.is_visible():
+            await submit.click()
+            await asyncio.sleep(2)
+            return {"status": "entered", "platform": detected_platform}
+    except Exception as exc:
+        logger.debug("WordPress forms handler (%s) error: %s", detected_platform, exc)
+    return None
+
+
+async def _enter_secondstreet(page: Page, profile: dict[str, str]) -> dict[str, Any] | None:
+    """Handle Second Street / UpicKem contest pages."""
+    is_ss = (
+        "secondstreet.com" in page.url
+        or "upickem.net" in page.url
+        or "contest.secondstreet.com" in page.url
+        or await page.query_selector(
+            "iframe[src*='secondstreet.com'], iframe[src*='upickem.net'], [data-second-street]"
+        ) is not None
+    )
+    if not is_ss:
+        return None
+    try:
+        iframe_el = await page.query_selector("iframe[src*='secondstreet.com'], iframe[src*='upickem.net']")
+        target = (await iframe_el.content_frame()) if iframe_el else page
+        if target is None:
+            return None
+        for inp in await target.query_selector_all("input[type='email']"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("email", ""))
+        for inp in await target.query_selector_all("input[name*='first' i]"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("first_name", ""))
+        for inp in await target.query_selector_all("input[name*='last' i]"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("last_name", ""))
+        for inp in await target.query_selector_all("input[type='tel'], input[name*='phone' i]"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("phone", ""))
+        for cb in await target.query_selector_all("input[type='checkbox']"):
+            if await cb.is_visible() and not await cb.is_checked():
+                await cb.check()
+        submit = await target.query_selector("button[type='submit'], input[type='submit']")
+        if submit and await submit.is_visible():
+            await submit.click()
+            await asyncio.sleep(2)
+            return {"status": "entered", "platform": "secondstreet"}
+    except Exception as exc:
+        logger.debug("Second Street handler error: %s", exc)
+    return None
+
+
+async def _enter_easypromos(page: Page, profile: dict[str, str]) -> dict[str, Any] | None:
+    """Handle Easypromos contest pages and embeds."""
+    is_ep = (
+        "easypromosapp.com" in page.url
+        or "easypromos.com" in page.url
+        or await page.query_selector("iframe[src*='easypromosapp.com'], iframe[src*='easypromos.com']") is not None
+    )
+    if not is_ep:
+        return None
+    try:
+        iframe_el = await page.query_selector(
+            "iframe[src*='easypromosapp.com'], iframe[src*='easypromos.com']"
+        )
+        target = (await iframe_el.content_frame()) if iframe_el else page
+        if target is None:
+            return None
+        for inp in await target.query_selector_all("input[type='email']"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("email", ""))
+        for inp in await target.query_selector_all("input[name*='name' i]"):
+            if await inp.is_visible():
+                full = f"{profile.get('first_name','')} {profile.get('last_name','')}".strip()
+                await inp.fill(full)
+        for inp in await target.query_selector_all("input[name*='first' i]"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("first_name", ""))
+        for inp in await target.query_selector_all("input[name*='last' i]"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("last_name", ""))
+        for cb in await target.query_selector_all("input[type='checkbox']"):
+            if await cb.is_visible() and not await cb.is_checked():
+                await cb.check()
+        submit = await target.query_selector("button[type='submit'], input[type='submit'], .ep-button-submit")
+        if submit and await submit.is_visible():
+            await submit.click()
+            await asyncio.sleep(2)
+            return {"status": "entered", "platform": "easypromos"}
+    except Exception as exc:
+        logger.debug("Easypromos handler error: %s", exc)
+    return None
+
+
+async def _enter_kickofflabs(page: Page, profile: dict[str, str]) -> dict[str, Any] | None:
+    """Handle KickoffLabs landing pages and embeds."""
+    is_kl = (
+        "kickofflabs.com" in page.url
+        or await page.query_selector(
+            "iframe[src*='kickofflabs.com'], script[src*='kickofflabs.com'], [data-kickofflabs]"
+        ) is not None
+    )
+    if not is_kl:
+        return None
+    try:
+        iframe_el = await page.query_selector("iframe[src*='kickofflabs.com']")
+        target = (await iframe_el.content_frame()) if iframe_el else page
+        if target is None:
+            return None
+        for inp in await target.query_selector_all("input[type='email']"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("email", ""))
+        for inp in await target.query_selector_all("input[name*='first' i]"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("first_name", ""))
+        for inp in await target.query_selector_all("input[name*='last' i]"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("last_name", ""))
+        submit = await target.query_selector("button[type='submit'], input[type='submit'], .kol-submit")
+        if submit and await submit.is_visible():
+            await submit.click()
+            await asyncio.sleep(2)
+            return {"status": "entered", "platform": "kickofflabs"}
+    except Exception as exc:
+        logger.debug("KickoffLabs handler error: %s", exc)
+    return None
+
+
+async def _enter_vyper(page: Page, profile: dict[str, str]) -> dict[str, Any] | None:
+    """Handle Vyper (formerly Socialman) viral giveaway pages."""
+    is_vy = (
+        "vyper.io" in page.url
+        or "socialman.net" in page.url
+        or await page.query_selector(
+            "iframe[src*='vyper.io'], iframe[src*='socialman.net'], script[src*='vyper.io']"
+        ) is not None
+    )
+    if not is_vy:
+        return None
+    try:
+        iframe_el = await page.query_selector("iframe[src*='vyper.io'], iframe[src*='socialman.net']")
+        target = (await iframe_el.content_frame()) if iframe_el else page
+        if target is None:
+            return None
+        for inp in await target.query_selector_all("input[type='email']"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("email", ""))
+        for inp in await target.query_selector_all("input[name*='first' i], input[placeholder*='first' i]"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("first_name", ""))
+        for inp in await target.query_selector_all("input[name*='last' i], input[placeholder*='last' i]"):
+            if await inp.is_visible():
+                await inp.fill(profile.get("last_name", ""))
+        submit = await target.query_selector("button[type='submit'], input[type='submit'], .vyper-submit")
+        if submit and await submit.is_visible():
+            await submit.click()
+            await asyncio.sleep(2)
+            return {"status": "entered", "platform": "vyper"}
+    except Exception as exc:
+        logger.debug("Vyper handler error: %s", exc)
+    return None
+
+
+async def _enter_generic_iframe(page: Page, profile: dict[str, str]) -> dict[str, Any] | None:
+    """
+    Fallback: scan all iframes on the page and attempt to fill any form found inside.
+    Used when no specific platform was detected.
+    """
+    try:
+        frames = page.frames
+        for frame in frames[1:]:  # skip main frame
+            try:
+                if not frame.url or frame.url == "about:blank":
+                    continue
+                email_inp = await frame.query_selector("input[type='email']")
+                if email_inp is None or not await email_inp.is_visible():
+                    continue
+                await email_inp.fill(profile.get("email", ""))
+                for inp in await frame.query_selector_all("input[name*='first' i]"):
+                    if await inp.is_visible():
+                        await inp.fill(profile.get("first_name", ""))
+                for inp in await frame.query_selector_all("input[name*='last' i]"):
+                    if await inp.is_visible():
+                        await inp.fill(profile.get("last_name", ""))
+                for inp in await frame.query_selector_all("input[type='tel'], input[name*='phone' i]"):
+                    if await inp.is_visible():
+                        await inp.fill(profile.get("phone", ""))
+                for cb in await frame.query_selector_all("input[type='checkbox']"):
+                    if await cb.is_visible() and not await cb.is_checked():
+                        await cb.check()
+                submit = await frame.query_selector("button[type='submit'], input[type='submit']")
+                if submit and await submit.is_visible():
+                    await submit.click()
+                    await asyncio.sleep(2)
+                    return {"status": "entered", "platform": "iframe_generic"}
+            except Exception:
+                continue
+    except Exception as exc:
+        logger.debug("Generic iframe handler error: %s", exc)
+    return None
+
+
 async def _detect_success(page: Page) -> bool:
     """Return True if the current page shows signs of a successful entry."""
     url = page.url.lower()
@@ -845,6 +1344,9 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
     except PlaywrightTimeout:
         return {"status": "error", "message": "Page load timeout"}
 
+    # ── Dismiss GDPR / cookie-consent banners first ───────────────────────────
+    await _dismiss_gdpr_consent(page)
+
     # ── Platform-specific handlers first ─────────────────────────────────────
     rc_result = await _enter_rafflecopter(page, profile)
     if rc_result:
@@ -873,6 +1375,50 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
     ss_result = await _enter_shortstack(page, profile)
     if ss_result:
         return ss_result
+
+    tf_result = await _enter_typeform(page, profile)
+    if tf_result:
+        return tf_result
+
+    jf_result = await _enter_jotform(page, profile)
+    if jf_result:
+        return jf_result
+
+    sww_result = await _enter_sweepwidget(page, profile)
+    if sww_result:
+        return sww_result
+
+    wp_result = await _enter_wishpond(page, profile)
+    if wp_result:
+        return wp_result
+
+    mc_result = await _enter_mailchimp(page, profile)
+    if mc_result:
+        return mc_result
+
+    wpf_result = await _enter_wordpress_forms(page, profile)
+    if wpf_result:
+        return wpf_result
+
+    street_result = await _enter_secondstreet(page, profile)
+    if street_result:
+        return street_result
+
+    ep_result = await _enter_easypromos(page, profile)
+    if ep_result:
+        return ep_result
+
+    kl_result = await _enter_kickofflabs(page, profile)
+    if kl_result:
+        return kl_result
+
+    vy_result = await _enter_vyper(page, profile)
+    if vy_result:
+        return vy_result
+
+    iframe_result = await _enter_generic_iframe(page, profile)
+    if iframe_result:
+        return iframe_result
 
     # ── Age gate bypass ───────────────────────────────────────────────────────
     await _bypass_age_gate(page, profile)
