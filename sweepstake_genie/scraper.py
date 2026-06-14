@@ -52,6 +52,20 @@ _SKIP_DOMAINS = {
     "snapchat.com",
 }
 
+# At least one of these must appear in the title OR URL path for a link to be
+# kept. Prevents deal articles, product pages, and sponsored content from
+# slipping through aggregators that mix sweepstakes with other content.
+_SWEEP_KEYWORDS = frozenset([
+    "sweepstakes", "sweepstake", "sweeps",
+    "giveaway", "giveaways",
+    "contest", "contests",
+    "prize", "prizes",
+    "drawing", "raffle",
+    "enter to win", "enter now",
+    "win a ", "win an ", "you could win",
+    "instant win", "instant-win",
+])
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Source configuration tables  ← add new sources here, no new functions needed
@@ -470,6 +484,12 @@ def _should_skip(url: str) -> bool:
     return any(host == d or host.endswith("." + d) for d in _SKIP_DOMAINS)
 
 
+def _looks_like_sweepstake(title: str, url: str) -> bool:
+    """Return True if the title or URL path contains a sweepstakes keyword."""
+    combined = (title + " " + urlparse(url).path).lower()
+    return any(kw in combined for kw in _SWEEP_KEYWORDS)
+
+
 def _extract_external_links(
     soup: BeautifulSoup,
     page_url: str,
@@ -500,6 +520,8 @@ def _extract_external_links(
             continue
         title = anchor.get_text(strip=True)
         if len(title) < min_title_len:
+            continue
+        if not _looks_like_sweepstake(title, full_url):
             continue
         seen.add(full_url)
         results.append({"url": full_url, "title": title, "source": source})
@@ -556,7 +578,7 @@ def _scrape_rss(feed_url: str, source: str) -> list[dict[str, Any]]:
             continue
         url   = (link_tag.string or link_tag.get_text()).strip()
         title = title_tag.get_text(strip=True)
-        if url.startswith("http") and not _should_skip(url):
+        if url.startswith("http") and not _should_skip(url) and _looks_like_sweepstake(title, url):
             results.append({"url": url, "title": title, "source": source})
 
     for entry in soup.find_all("entry"):
@@ -566,7 +588,7 @@ def _scrape_rss(feed_url: str, source: str) -> list[dict[str, Any]]:
             continue
         url   = link_tag.get("href", "").strip()
         title = title_tag.get_text(strip=True)
-        if url.startswith("http") and not _should_skip(url):
+        if url.startswith("http") and not _should_skip(url) and _looks_like_sweepstake(title, url):
             results.append({"url": url, "title": title, "source": source})
 
     logger.info("%s (RSS): %d sweepstakes", source, len(results))

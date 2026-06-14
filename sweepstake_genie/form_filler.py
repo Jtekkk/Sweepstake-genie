@@ -21,15 +21,21 @@ logger = logging.getLogger(__name__)
 # ── CAPTCHA detection selectors ───────────────────────────────────────────────
 
 _CAPTCHA_SELECTORS = [
+    # Specific CAPTCHA iframes (most reliable signal)
     "iframe[src*='recaptcha']",
     "iframe[src*='hcaptcha']",
-    "iframe[src*='captcha']",
+    "iframe[src*='challenges.cloudflare']",
+    # Official widget classes
     ".g-recaptcha",
     ".h-captcha",
-    "#captcha",
-    "[class*='captcha']",
-    "[id*='captcha']",
+    ".cf-turnstile",
+    # Data attributes used by reCAPTCHA / hCaptcha
     "div[data-sitekey]",
+    "[data-hcaptcha-widget-id]",
+    # Broad ID match only (not class — too many false positives)
+    "#captcha",
+    "#recaptcha",
+    "#hcaptcha",
 ]
 
 # ── Field selector map ────────────────────────────────────────────────────────
@@ -160,7 +166,9 @@ async def _has_captcha(page: Page) -> bool:
     for sel in _CAPTCHA_SELECTORS:
         try:
             el = await page.query_selector(sel)
-            if el:
+            # Must be visible — many sites have hidden captcha containers in the
+            # DOM that are never shown to the user, causing false positives.
+            if el and await el.is_visible():
                 return True
         except Exception:
             pass
