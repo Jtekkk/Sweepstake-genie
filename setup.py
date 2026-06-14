@@ -10,6 +10,7 @@ setup(
     install_requires=[
         "playwright>=1.40.0",
         "beautifulsoup4>=4.12.0",
+        "lxml>=4.9.0",
         "requests>=2.31.0",
         "pyyaml>=6.0",
         "rich>=13.0.0",
