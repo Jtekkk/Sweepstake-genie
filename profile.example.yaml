@@ -22,3 +22,5 @@ settings:
   skip_captcha: true       # skip forms with captcha, log them instead
   log_file: "entries.log"
   database: "sweepstakes.db"
+  captcha_service: "none"  # options: none, 2captcha, capsolver
+  captcha_api_key: ""      # your API key from the service above
