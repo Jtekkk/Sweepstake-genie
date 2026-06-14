@@ -76,6 +76,10 @@ class BrowserManager:
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
+                "--disable-features=IsolateOrigins,site-per-process",
+                "--disable-site-isolation-trials",
+                "--disable-web-security",
+                "--allow-running-insecure-content",
             ],
         )
         self._context = await self._browser.new_context(
@@ -120,4 +124,9 @@ class BrowserManager:
         # Default navigation timeout — individual callers can override
         page.set_default_navigation_timeout(15_000)
         page.set_default_timeout(15_000)
+        try:
+            from playwright_stealth import stealth_async
+            await stealth_async(page)
+        except ImportError:
+            pass  # stealth package not installed, skip
         return page

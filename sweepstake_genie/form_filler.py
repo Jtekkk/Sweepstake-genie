@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from typing import Any
 
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeout
@@ -211,7 +212,56 @@ _SUCCESS_TEXT_PATTERNS = [
     "you have successfully", "your entry has been",
 ]
 
-_FIELD_DELAY = 0.3  # seconds between field fills
+_FIELD_DELAY_MIN = 0.15
+_FIELD_DELAY_MAX = 0.45
+
+
+async def _human_delay(min_s: float = _FIELD_DELAY_MIN, max_s: float = _FIELD_DELAY_MAX) -> None:
+    await asyncio.sleep(random.uniform(min_s, max_s))
+
+
+# ── Full name field selectors ─────────────────────────────────────────────────
+# Used when a form has a single combined name field instead of first + last.
+
+_FULL_NAME_SELECTORS = [
+    "input[name='name']",
+    "input[id='name']",
+    "input[name*='fullname' i]",
+    "input[name*='full_name' i]",
+    "input[name*='full-name' i]",
+    "input[id*='fullname' i]",
+    "input[id*='full_name' i]",
+    "input[placeholder*='full name' i]",
+    "input[placeholder*='your name' i]",
+    "input[placeholder*='name' i]:not([placeholder*='first']):not([placeholder*='last'])",
+]
+
+# ── Gender field selectors ────────────────────────────────────────────────────
+
+_GENDER_SELECTORS_MALE = [
+    "input[type='radio'][value*='male' i]:not([value*='female' i])",
+    "input[type='radio'][value='M']",
+    "input[type='radio'][value='m']",
+    "input[type='radio'][id*='male' i]:not([id*='female' i])",
+    "input[type='radio'][name*='gender' i][value*='male' i]",
+    "input[type='radio'][name*='sex' i][value*='male' i]",
+]
+
+_GENDER_SELECTORS_FEMALE = [
+    "input[type='radio'][value*='female' i]",
+    "input[type='radio'][value='F']",
+    "input[type='radio'][value='f']",
+    "input[type='radio'][id*='female' i]",
+    "input[type='radio'][name*='gender' i][value*='female' i]",
+    "input[type='radio'][name*='sex' i][value*='female' i]",
+]
+
+_GENDER_SELECT_SELECTORS = [
+    "select[name*='gender' i]",
+    "select[id*='gender' i]",
+    "select[name*='sex' i]",
+    "select[id*='sex' i]",
+]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -474,6 +524,195 @@ async def _enter_gleam(page: Page, profile: dict) -> dict[str, Any] | None:
     return None
 
 
+async def _fill_full_name(page: Page, profile: dict[str, str]) -> bool:
+    """Fill a combined full-name field if separate first/last weren't found."""
+    full_name = f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip()
+    if not full_name:
+        return False
+    for sel in _FULL_NAME_SELECTORS:
+        try:
+            el = await page.query_selector(sel)
+            if el and await el.is_visible() and await el.is_enabled():
+                await el.triple_click()
+                await el.fill(full_name)
+                await _human_delay()
+                return True
+        except Exception:
+            pass
+    return False
+
+
+async def _handle_gender(page: Page, gender: str = "M") -> None:
+    """Try to fill a gender field with the given gender ('M' or 'F')."""
+    selectors = _GENDER_SELECTORS_MALE if gender.upper() in ("M", "MALE") else _GENDER_SELECTORS_FEMALE
+    for sel in selectors:
+        try:
+            el = await page.query_selector(sel)
+            if el and await el.is_visible() and await el.is_enabled():
+                await el.click()
+                await asyncio.sleep(0.2)
+                return
+        except Exception:
+            pass
+
+    # Try select dropdown
+    for sel in _GENDER_SELECT_SELECTORS:
+        try:
+            el = await page.query_selector(sel)
+            if el and await el.is_visible():
+                # Try common values
+                for val in (["male", "m", "1"] if gender.upper() in ("M", "MALE") else ["female", "f", "2"]):
+                    try:
+                        await page.select_option(sel, value=val)
+                        await asyncio.sleep(0.2)
+                        return
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+
+async def _enter_viralsweep(page: Page, profile: dict[str, str]) -> dict[str, Any] | None:
+    """Handle ViralSweep giveaway widgets."""
+    is_vs = "viralsweep.com" in page.url or await page.query_selector(
+        "iframe[src*='viralsweep'], script[src*='viralsweep'], .viralsweep-container, #viralsweep"
+    ) is not None
+    if not is_vs:
+        return None
+    try:
+        iframe_el = await page.query_selector("iframe[src*='viralsweep']")
+        target = (await iframe_el.content_frame()) if iframe_el else page
+        email = await target.query_selector("input[type='email'], input[name*='email' i]")
+        if email and await email.is_visible():
+            await email.fill(profile.get("email", ""))
+            fn = await target.query_selector("input[name*='first' i], input[placeholder*='first' i]")
+            if fn:
+                await fn.fill(profile.get("first_name", ""))
+            ln = await target.query_selector("input[name*='last' i], input[placeholder*='last' i]")
+            if ln:
+                await ln.fill(profile.get("last_name", ""))
+            submit = await target.query_selector("button[type='submit'], input[type='submit'], .vs-submit")
+            if submit:
+                await submit.click()
+                await asyncio.sleep(2)
+                return {"status": "entered", "platform": "viralsweep"}
+    except Exception as exc:
+        logger.debug("ViralSweep handler error: %s", exc)
+    return None
+
+
+async def _enter_woobox(page: Page, profile: dict[str, str]) -> dict[str, Any] | None:
+    """Handle Woobox giveaway embeds."""
+    is_wb = "woobox.com" in page.url or await page.query_selector(
+        "iframe[src*='woobox'], script[src*='woobox.com']"
+    ) is not None
+    if not is_wb:
+        return None
+    try:
+        iframe_el = await page.query_selector("iframe[src*='woobox']")
+        target = (await iframe_el.content_frame()) if iframe_el else page
+        email = await target.query_selector("input[type='email'], input[name*='email' i]")
+        if email and await email.is_visible():
+            await email.fill(profile.get("email", ""))
+            fn = await target.query_selector("input[name*='first' i]")
+            if fn:
+                await fn.fill(profile.get("first_name", ""))
+            ln = await target.query_selector("input[name*='last' i]")
+            if ln:
+                await ln.fill(profile.get("last_name", ""))
+            await asyncio.sleep(0.3)
+            submit = await target.query_selector("button[type='submit'], input[type='submit'], .woobox-submit")
+            if submit:
+                await submit.click()
+                await asyncio.sleep(2)
+                return {"status": "entered", "platform": "woobox"}
+    except Exception as exc:
+        logger.debug("Woobox handler error: %s", exc)
+    return None
+
+
+async def _enter_kingsumo(page: Page, profile: dict[str, str]) -> dict[str, Any] | None:
+    """Handle KingSumo giveaway pages."""
+    is_ks = "kingsumo.com" in page.url or await page.query_selector(
+        "form.giveaway-form, #kingsumo-form, .kingsumo-widget"
+    ) is not None
+    if not is_ks:
+        return None
+    try:
+        email = await page.query_selector("input[type='email'], input[name='email']")
+        if email and await email.is_visible():
+            await email.fill(profile.get("email", ""))
+            fn = await page.query_selector("input[name='first_name'], input[placeholder*='first' i]")
+            if fn:
+                await fn.fill(profile.get("first_name", ""))
+            submit = await page.query_selector("button[type='submit'], input[type='submit']")
+            if submit:
+                await submit.click()
+                await asyncio.sleep(2)
+                return {"status": "entered", "platform": "kingsumo"}
+    except Exception as exc:
+        logger.debug("KingSumo handler error: %s", exc)
+    return None
+
+
+async def _enter_promosimple(page: Page, profile: dict[str, str]) -> dict[str, Any] | None:
+    """Handle PromoSimple giveaway widgets."""
+    is_ps = "promosimple.com" in page.url or await page.query_selector(
+        "iframe[src*='promosimple'], script[src*='promosimple']"
+    ) is not None
+    if not is_ps:
+        return None
+    try:
+        iframe_el = await page.query_selector("iframe[src*='promosimple']")
+        target = (await iframe_el.content_frame()) if iframe_el else page
+        email = await target.query_selector("input[type='email'], input[name*='email' i]")
+        if email and await email.is_visible():
+            await email.fill(profile.get("email", ""))
+            fn = await target.query_selector("input[name*='first' i]")
+            if fn:
+                await fn.fill(profile.get("first_name", ""))
+            ln = await target.query_selector("input[name*='last' i]")
+            if ln:
+                await ln.fill(profile.get("last_name", ""))
+            submit = await target.query_selector("button[type='submit'], input[type='submit']")
+            if submit:
+                await submit.click()
+                await asyncio.sleep(2)
+                return {"status": "entered", "platform": "promosimple"}
+    except Exception as exc:
+        logger.debug("PromoSimple handler error: %s", exc)
+    return None
+
+
+async def _enter_shortstack(page: Page, profile: dict[str, str]) -> dict[str, Any] | None:
+    """Handle ShortStack campaign pages."""
+    is_ss = "shortstack.com" in page.url or await page.query_selector(
+        "iframe[src*='shortstack'], script[src*='shortstack.com'], .ss-widget"
+    ) is not None
+    if not is_ss:
+        return None
+    try:
+        iframe_el = await page.query_selector("iframe[src*='shortstack']")
+        target = (await iframe_el.content_frame()) if iframe_el else page
+        email = await target.query_selector("input[type='email'], input[name*='email' i]")
+        if email and await email.is_visible():
+            await email.fill(profile.get("email", ""))
+            fn = await target.query_selector("input[name*='first' i]")
+            if fn:
+                await fn.fill(profile.get("first_name", ""))
+            ln = await target.query_selector("input[name*='last' i]")
+            if ln:
+                await ln.fill(profile.get("last_name", ""))
+            submit = await target.query_selector("button[type='submit'], input[type='submit'], .ss-form-submit")
+            if submit:
+                await submit.click()
+                await asyncio.sleep(2)
+                return {"status": "entered", "platform": "shortstack"}
+    except Exception as exc:
+        logger.debug("ShortStack handler error: %s", exc)
+    return None
+
+
 async def _detect_success(page: Page) -> bool:
     """Return True if the current page shows signs of a successful entry."""
     url = page.url.lower()
@@ -510,7 +749,7 @@ async def _fill_field(page: Page, selectors: list[str], value: str, is_select: b
                 await el.triple_click()
                 await el.fill(value)
 
-            await asyncio.sleep(_FIELD_DELAY)
+            await _human_delay()
             return True
         except Exception as exc:
             logger.debug("fill_field selector=%s error=%s", sel, exc)
@@ -536,7 +775,7 @@ async def _fill_state(page: Page, state_value: str) -> None:
                     await page.select_option(sel, label=state_value)
             else:
                 await page.fill(sel, state_value)
-            await asyncio.sleep(_FIELD_DELAY)
+            await _human_delay()
             return
         except Exception as exc:
             logger.debug("fill_state selector=%s error=%s", sel, exc)
@@ -615,6 +854,26 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
     if gleam_result:
         return gleam_result
 
+    vs_result = await _enter_viralsweep(page, profile)
+    if vs_result:
+        return vs_result
+
+    wb_result = await _enter_woobox(page, profile)
+    if wb_result:
+        return wb_result
+
+    ks_result = await _enter_kingsumo(page, profile)
+    if ks_result:
+        return ks_result
+
+    ps_result = await _enter_promosimple(page, profile)
+    if ps_result:
+        return ps_result
+
+    ss_result = await _enter_shortstack(page, profile)
+    if ss_result:
+        return ss_result
+
     # ── Age gate bypass ───────────────────────────────────────────────────────
     await _bypass_age_gate(page, profile)
 
@@ -660,6 +919,16 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
         if state_value:
             await _fill_state(page, state_value)
 
+        # Full name field (fallback when first+last fields not found)
+        if fields_filled < 2:
+            fn_filled = await _fill_full_name(page, profile)
+            if fn_filled:
+                fields_filled += 1
+
+        # Gender field
+        gender = profile.get("gender", "M")
+        await _handle_gender(page, gender)
+
         await _check_terms(page)
 
         total_fields_filled += fields_filled
@@ -695,13 +964,28 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
 async def enter_sweepstake(page: Page, url: str, profile: dict[str, str], captcha_solver=None) -> dict[str, Any]:
     """
     Navigate to *url* and attempt entry.  Wraps :func:`fill_and_submit` with
-    navigation error handling.
+    navigation error handling and a single automatic retry on transient errors.
     """
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
-    except PlaywrightTimeout:
-        return {"status": "error", "message": f"Navigation timeout: {url}"}
-    except Exception as exc:
-        return {"status": "error", "message": str(exc)}
+    for attempt in range(2):
+        try:
+            if attempt == 0:
+                await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+            else:
+                # Retry: reload the page
+                await page.reload(wait_until="domcontentloaded", timeout=20_000)
+                await asyncio.sleep(random.uniform(1.5, 3.0))
 
-    return await fill_and_submit(page, profile, captcha_solver=captcha_solver)
+            result = await fill_and_submit(page, profile, captcha_solver=captcha_solver)
+
+            # Only retry on transient errors, not on no_form/captcha/entered
+            if result["status"] != "error" or attempt == 1:
+                return result
+
+        except PlaywrightTimeout:
+            if attempt == 1:
+                return {"status": "error", "message": f"Navigation timeout after retry: {url}"}
+        except Exception as exc:
+            if attempt == 1:
+                return {"status": "error", "message": str(exc)}
+
+    return {"status": "error", "message": "Unknown failure"}
