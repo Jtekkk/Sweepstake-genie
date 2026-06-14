@@ -28,9 +28,9 @@ _MAX_POLLS     = 24  # max 2 minutes total wait
 
 
 class CaptchaSolver:
-    def __init__(self, service: Service = "none", api_key: str = "") -> None:
-        self.service  = service.lower()
-        self.api_key  = api_key
+    def __init__(self, service: Service | None = "none", api_key: str = "") -> None:
+        self.service  = (service or "none").lower()
+        self.api_key  = api_key or ""
         self._session = requests.Session()
 
     @property
