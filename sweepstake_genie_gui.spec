@@ -10,6 +10,11 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 playwright_datas   = collect_data_files('playwright', include_py_files=False)
 playwright_binaries = collect_dynamic_libs('playwright')
 
+try:
+    stealth_datas = collect_data_files('playwright_stealth', include_py_files=False)
+except Exception:
+    stealth_datas = []
+
 a = Analysis(
     ['gui.py'],
     pathex=[],
@@ -17,7 +22,7 @@ a = Analysis(
     datas=[
         ('profile.example.yaml', '.'),
         ('sweepstake_genie', 'sweepstake_genie'),
-    ] + playwright_datas,
+    ] + playwright_datas + stealth_datas,
     hiddenimports=[
         'customtkinter',
         'PIL',

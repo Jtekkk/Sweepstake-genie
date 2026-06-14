@@ -82,11 +82,7 @@ class BrowserManager:
                 "--disable-site-isolation-trials",
                 "--disable-web-security",
                 "--allow-running-insecure-content",
-                "--no-zygote",
-                "--single-process",
                 "--disable-extensions",
-                "--disable-background-networking",
-                "--disable-default-apps",
                 "--mute-audio",
             ],
         )
@@ -110,12 +106,16 @@ class BrowserManager:
         exc_val: BaseException | None,
         exc_tb: "TracebackType | None",
     ) -> None:
-        if self._context:
-            await self._context.close()
-        if self._browser:
-            await self._browser.close()
-        if self._playwright:
-            await self._playwright.stop()
+        for obj, method in [
+            (self._context, "close"),
+            (self._browser, "close"),
+            (self._playwright, "stop"),
+        ]:
+            if obj is not None:
+                try:
+                    await getattr(obj, method)()
+                except Exception:
+                    pass
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -135,6 +135,6 @@ class BrowserManager:
         try:
             from playwright_stealth import stealth_async
             await stealth_async(page)
-        except ImportError:
-            pass  # stealth package not installed, skip
+        except Exception:
+            pass  # stealth not installed or JS files missing (e.g. PyInstaller bundle)
         return page
