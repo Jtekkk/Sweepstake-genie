@@ -569,7 +569,7 @@ class SweepstakeGenieApp(ctk.CTk):
                 )
 
                 counts: dict[str, int] = {
-                    "entered": 0, "captcha": 0, "no_form": 0, "error": 0
+                    "entered": 0, "captcha": 0, "no_form": 0, "expired": 0, "error": 0
                 }
                 total = len(pending)
 
@@ -588,8 +588,9 @@ class SweepstakeGenieApp(ctk.CTk):
                                 return
                             url   = sw["url"]
                             title = (sw.get("title") or url)[:70]
-                            page  = await bm.new_page()
+                            page  = None
                             try:
+                                page = await bm.new_page()
                                 result = await enter_sweepstake(
                                     page, url, config.profile,
                                     captcha_solver=captcha_solver
@@ -597,12 +598,18 @@ class SweepstakeGenieApp(ctk.CTk):
                                 status = result["status"]
                                 if status == "entered":
                                     db.mark_entered(url)
+                                    if result.get("allows_daily"):
+                                        db.mark_allows_daily(url)
                                     counts["entered"] += 1
                                     icon = "✓"
                                 elif status == "captcha":
                                     db.mark_captcha(url)
                                     counts["captcha"] += 1
                                     icon = "⚠"
+                                elif status == "expired":
+                                    db.mark_skipped(url, "expired")
+                                    counts["expired"] += 1
+                                    icon = "⌛"
                                 elif status == "no_form":
                                     db.mark_skipped(url, "no entry form detected")
                                     counts["no_form"] += 1
@@ -617,8 +624,19 @@ class SweepstakeGenieApp(ctk.CTk):
                                 )
                                 self._log_queue.put(("stats_refresh", None))
                                 self._log_queue.put(("progress", idx / total))
+                            except Exception as exc:
+                                db.mark_error(url, str(exc))
+                                counts["error"] += 1
+                                self._log_queue.put(
+                                    f"[{_ts()}] ✗ [{idx}/{total}] {title} — {exc}"
+                                )
+                                self._log_queue.put(("stats_refresh", None))
                             finally:
-                                await page.close()
+                                if page is not None:
+                                    try:
+                                        await page.close()
+                                    except Exception:
+                                        pass
                             if config.delay_between_entries > 0:
                                 await asyncio.sleep(config.delay_between_entries)
 
@@ -634,13 +652,16 @@ class SweepstakeGenieApp(ctk.CTk):
                 self._log_queue.put(
                     f"[{_ts()}] Done — Entered: {counts['entered']}, "
                     f"CAPTCHA: {counts['captcha']}, "
+                    f"Expired: {counts['expired']}, "
                     f"No form: {counts['no_form']}, "
                     f"Errors: {counts['error']}"
                 )
                 self._log_queue.put(("done", "Done"))
 
             except Exception as exc:
+                import traceback
                 self._log_queue.put(f"[{_ts()}] ERROR: {exc}")
+                self._log_queue.put(f"[{_ts()}] {traceback.format_exc()}")
                 self._log_queue.put(("done", "Error"))
 
         self._running_thread = _run_in_thread(task)
@@ -696,7 +717,7 @@ class SweepstakeGenieApp(ctk.CTk):
 
                 total = len(pending)
                 counts: dict[str, int] = {
-                    "entered": 0, "captcha": 0, "no_form": 0, "error": 0
+                    "entered": 0, "captcha": 0, "no_form": 0, "expired": 0, "error": 0
                 }
 
                 from sweepstake_genie.captcha_solver import CaptchaSolver
@@ -716,8 +737,9 @@ class SweepstakeGenieApp(ctk.CTk):
                                 return
                             url   = sw["url"]
                             title = (sw.get("title") or url)[:70]
-                            page  = await bm.new_page()
+                            page  = None
                             try:
+                                page = await bm.new_page()
                                 result = await enter_sweepstake(
                                     page, url, config.profile,
                                     captcha_solver=captcha_solver
@@ -725,12 +747,18 @@ class SweepstakeGenieApp(ctk.CTk):
                                 status = result["status"]
                                 if status == "entered":
                                     db.mark_entered(url)
+                                    if result.get("allows_daily"):
+                                        db.mark_allows_daily(url)
                                     counts["entered"] += 1
                                     icon = "✓"
                                 elif status == "captcha":
                                     db.mark_captcha(url)
                                     counts["captcha"] += 1
                                     icon = "⚠"
+                                elif status == "expired":
+                                    db.mark_skipped(url, "expired")
+                                    counts["expired"] += 1
+                                    icon = "⌛"
                                 elif status == "no_form":
                                     db.mark_skipped(url, "no entry form detected")
                                     counts["no_form"] += 1
@@ -745,8 +773,19 @@ class SweepstakeGenieApp(ctk.CTk):
                                 )
                                 self._log_queue.put(("stats_refresh", None))
                                 self._log_queue.put(("progress", idx / total))
+                            except Exception as exc:
+                                db.mark_error(url, str(exc))
+                                counts["error"] += 1
+                                self._log_queue.put(
+                                    f"[{_ts()}] ✗ [{idx}/{total}] {title} — {exc}"
+                                )
+                                self._log_queue.put(("stats_refresh", None))
                             finally:
-                                await page.close()
+                                if page is not None:
+                                    try:
+                                        await page.close()
+                                    except Exception:
+                                        pass
                             if config.delay_between_entries > 0:
                                 await asyncio.sleep(config.delay_between_entries)
 
@@ -762,13 +801,16 @@ class SweepstakeGenieApp(ctk.CTk):
                 self._log_queue.put(
                     f"[{_ts()}] Daily re-entry done — Entered: {counts['entered']}, "
                     f"CAPTCHA: {counts['captcha']}, "
+                    f"Expired: {counts['expired']}, "
                     f"No form: {counts['no_form']}, "
                     f"Errors: {counts['error']}"
                 )
                 self._log_queue.put(("done", "Done"))
 
             except Exception as exc:
+                import traceback
                 self._log_queue.put(f"[{_ts()}] ERROR: {exc}")
+                self._log_queue.put(f"[{_ts()}] {traceback.format_exc()}")
                 self._log_queue.put(("done", "Error"))
 
         self._running_thread = _run_in_thread(task)
