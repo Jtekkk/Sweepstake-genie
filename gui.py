@@ -8,6 +8,8 @@ Run with:
 from __future__ import annotations
 
 import asyncio
+import multiprocessing
+import os
 import queue
 import subprocess
 import sys
@@ -15,6 +17,9 @@ import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+# Must be called before any multiprocessing usage in a PyInstaller frozen exe.
+multiprocessing.freeze_support()
 
 import customtkinter as ctk
 import yaml
@@ -72,27 +77,35 @@ def _run_in_thread(target_fn) -> threading.Thread:
 
 
 def _check_playwright_browsers() -> bool:
-    """Return True if Playwright Chromium is already installed."""
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "--dry-run", "chromium"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        # Dry-run exits 0 and prints nothing meaningful when browsers are present;
-        # if it mentions "download" or "install" in stdout the browser is missing.
-        return "download" not in result.stdout.lower() and result.returncode == 0
-    except Exception:
-        return True  # Assume present if we can't check
+    """Return True if Playwright Chromium cache directory exists.
+
+    Uses a filesystem check rather than spawning a subprocess so that a
+    frozen PyInstaller exe doesn't re-launch itself.
+    """
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA", "")) / "ms-playwright"
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Caches" / "ms-playwright"
+    else:
+        base = Path.home() / ".cache" / "ms-playwright"
+
+    if not base.exists():
+        return False
+    return any("chromium" in entry.name.lower() for entry in base.iterdir())
 
 
 def _install_playwright_browsers(log_q: queue.Queue) -> None:
     """Install Playwright Chromium in a background thread, posting progress to *log_q*."""
     log_q.put(f"[{_ts()}] Installing Playwright Chromium (one-time setup, ~150 MB)…")
+    # When frozen as a PyInstaller exe, sys.executable is the exe itself — use
+    # the 'playwright' CLI from PATH instead of '-m playwright'.
+    if getattr(sys, "frozen", False):
+        cmd = ["playwright", "install", "chromium"]
+    else:
+        cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
     try:
         proc = subprocess.Popen(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -894,4 +907,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()
