@@ -202,6 +202,25 @@ class Database:
             stats[row["status"]] = row["cnt"]
         return stats
 
+    def get_retryable(self, include_captcha: bool = False) -> list[dict[str, Any]]:
+        """
+        Return sweepstakes that previously failed and are worth retrying.
+
+        Always includes ``error`` entries (likely transient timeouts/network
+        blips).  Optionally includes ``captcha`` entries when a solver is now
+        available.
+        """
+        statuses = [STATUS_ERROR]
+        if include_captcha:
+            statuses.append(STATUS_CAPTCHA)
+        placeholders = ",".join("?" * len(statuses))
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM sweepstakes WHERE status IN ({placeholders}) ORDER BY id",
+                statuses,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def url_exists(self, url: str) -> bool:
         """Return True if *url* is already tracked in the database."""
         with self._conn() as conn:

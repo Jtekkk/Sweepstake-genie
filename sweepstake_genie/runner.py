@@ -77,10 +77,15 @@ async def _enter_worker(
             status = result["status"]
             if status == "entered":
                 db.mark_entered(url)
+                if result.get("allows_daily"):
+                    db.mark_allows_daily(url)
                 icon = "[green]✓[/green]"
             elif status == "captcha":
                 db.mark_captcha(url)
                 icon = "[yellow]⚠[/yellow]"
+            elif status == "expired":
+                db.mark_skipped(url, "expired")
+                icon = "[dim]⌛[/dim]"
             elif status == "no_form":
                 db.mark_skipped(url, "no entry form detected")
                 icon = "[dim]–[/dim]"
@@ -101,10 +106,20 @@ async def _run_enter_async(config: Config, db: Database) -> None:
         api_key=config.captcha_api_key,
     )
 
-    pending = db.get_pending()
-    daily   = db.get_due_for_reentry()
-    pending_urls = {sw["url"] for sw in pending}
-    all_entries = pending + [e for e in daily if e["url"] not in pending_urls]
+    pending   = db.get_pending()
+    daily     = db.get_due_for_reentry()
+    retryable = db.get_retryable(include_captcha=captcha_solver.enabled)
+
+    seen_urls: set[str] = {sw["url"] for sw in pending}
+    for e in daily:
+        if e["url"] not in seen_urls:
+            pending.append(e)
+            seen_urls.add(e["url"])
+    for e in retryable:
+        if e["url"] not in seen_urls:
+            pending.append(e)
+            seen_urls.add(e["url"])
+    all_entries = pending
 
     if not all_entries:
         console.print("[yellow]No sweepstakes to enter.[/yellow]")
@@ -164,8 +179,12 @@ async def _enter_one(url: str, config: Config, db: Database) -> None:
 
     if status == "entered":
         db.mark_entered(url)
+        if result.get("allows_daily"):
+            db.mark_allows_daily(url)
     elif status == "captcha":
         db.mark_captcha(url)
+    elif status == "expired":
+        db.mark_skipped(url, "expired")
     elif status == "no_form":
         db.mark_skipped(url, "no entry form detected")
     else:

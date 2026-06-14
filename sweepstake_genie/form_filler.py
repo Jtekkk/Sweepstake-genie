@@ -212,6 +212,33 @@ _SUCCESS_TEXT_PATTERNS = [
     "you have successfully", "your entry has been",
 ]
 
+# Expired/closed sweepstake text fragments (lower-cased)
+_EXPIRED_PATTERNS = [
+    "this sweepstakes has ended", "this giveaway has ended",
+    "this contest has ended", "sweepstakes has ended",
+    "giveaway has ended", "contest has ended",
+    "contest is closed", "sweepstakes is closed", "giveaway is closed",
+    "entries are closed", "entry period has ended", "entry period has closed",
+    "entry period is now closed", "no longer accepting entries",
+    "entry deadline has passed", "winner has been selected",
+    "winners have been selected", "winner has been announced",
+    "drawing has been held", "promotion has ended", "promotion has closed",
+    "giveaway is over", "contest is over", "sweepstakes is over",
+    "this promotion has ended", "unfortunately, this contest",
+    "competition has closed", "submission period is closed",
+    "closed to entries", "this offer has expired", "offer has expired",
+]
+
+# Daily re-entry text fragments (lower-cased)
+_DAILY_ENTRY_PATTERNS = [
+    "enter daily", "enter once per day", "enter once a day",
+    "daily entry", "one entry per day", "1 entry per day",
+    "come back tomorrow", "enter again tomorrow", "enter every day",
+    "daily sweepstakes", "enter each day", "entries per day",
+    "once daily", "once per day", "daily giveaway", "daily contest",
+    "enter again each day", "you may enter again",
+]
+
 _FIELD_DELAY_MIN = 0.15
 _FIELD_DELAY_MAX = 0.45
 
@@ -1226,6 +1253,24 @@ async def _detect_success(page: Page) -> bool:
     return False
 
 
+async def _is_expired(page: Page) -> bool:
+    """Return True if the page indicates the sweepstake is closed/expired."""
+    try:
+        content = (await page.text_content("body") or "").lower()
+        return any(p in content for p in _EXPIRED_PATTERNS)
+    except Exception:
+        return False
+
+
+async def _check_daily_entry(page: Page) -> bool:
+    """Return True if the page indicates daily re-entry is allowed."""
+    try:
+        content = (await page.text_content("body") or "").lower()
+        return any(p in content for p in _DAILY_ENTRY_PATTERNS)
+    except Exception:
+        return False
+
+
 async def _fill_field(page: Page, selectors: list[str], value: str, is_select: bool = False) -> bool:
     """Try each selector in order; fill the first visible, enabled match. Returns True if filled."""
     for sel in selectors:
@@ -1426,6 +1471,10 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
     # ── Wait for dynamic form to load ─────────────────────────────────────────
     await _wait_for_form(page)
 
+    # ── Expiry check — skip closed sweepstakes immediately ────────────────────
+    if await _is_expired(page):
+        return {"status": "expired"}
+
     # ── CAPTCHA detection & solving ───────────────────────────────────────────
     captcha_type, sitekey = await _detect_captcha(page)
     if captcha_type:
@@ -1523,8 +1572,12 @@ async def enter_sweepstake(page: Page, url: str, profile: dict[str, str], captch
 
             result = await fill_and_submit(page, profile, captcha_solver=captcha_solver)
 
-            # Only retry on transient errors, not on no_form/captcha/entered
-            if result["status"] != "error" or attempt == 1:
+            # Annotate successful entries with daily re-entry flag
+            if result["status"] == "entered" and "allows_daily" not in result:
+                result["allows_daily"] = await _check_daily_entry(page)
+
+            # Only retry on transient errors, not on no_form/captcha/entered/expired
+            if result["status"] not in ("error",) or attempt == 1:
                 return result
 
         except PlaywrightTimeout:
