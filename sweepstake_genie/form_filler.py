@@ -38,6 +38,30 @@ _CAPTCHA_SELECTORS = [
     "#hcaptcha",
 ]
 
+# ── Age gate selectors ────────────────────────────────────────────────────────
+
+_AGE_GATE_SELECTORS = [
+    # Container selectors — if found, look for Yes/Enter button inside
+    ".age-gate", "#age-gate", "[class*='age-gate']",
+    ".age-verification", "#age-verification", "[class*='age-verify']",
+    "#ageModal", ".modal-age", "[data-age-gate]",
+]
+
+_AGE_GATE_BUTTONS = [
+    "button:has-text('Yes, I am')",
+    "button:has-text('I am 18')",
+    "button:has-text('I am over')",
+    "button:has-text('Yes, I\\'m')",
+    "a:has-text('I am 18')",
+    "a:has-text('Yes')",
+    ".age-gate button",
+    "#age-gate button",
+    "[class*='age-gate'] button",
+    "[class*='age-gate'] a",
+    "input[value*='Yes' i][type='button']",
+    "input[value*='Enter' i][type='button']",
+]
+
 # ── Field selector map ────────────────────────────────────────────────────────
 # Maps profile key → list of CSS selectors tried in order
 
@@ -157,10 +181,53 @@ _TERMS_SELECTORS = [
     "input[type='checkbox'][name*='optin' i]",
 ]
 
+# Next/Continue step selectors for multi-step forms
+_NEXT_STEP_SELECTORS = [
+    "button:has-text('Next')",
+    "button:has-text('Continue')",
+    "button:has-text('Next Step')",
+    "button:has-text('Next Page')",
+    "button:has-text('Proceed')",
+    "input[value*='Next' i]",
+    "input[value*='Continue' i]",
+    ".btn-next", ".next-step", ".next-btn",
+    "[data-action='next']",
+    "button[class*='next' i]",
+]
+
+# Success URL path fragments
+_SUCCESS_URL_PATTERNS = [
+    "/thank", "/thanks", "/success", "/confirm", "/thank-you",
+    "/thankyou", "/entry-complete", "/entered", "/congratulations",
+]
+
+# Success page text fragments (lower-cased)
+_SUCCESS_TEXT_PATTERNS = [
+    "thank you for entering", "thank you for your entry",
+    "you have been entered", "you're entered", "you are entered",
+    "entry received", "entry confirmed", "entry complete",
+    "successfully entered", "successfully submitted",
+    "good luck", "submission received", "congratulations",
+    "you have successfully", "your entry has been",
+]
+
 _FIELD_DELAY = 0.3  # seconds between field fills
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+async def _wait_for_form(page: Page) -> bool:
+    """Wait up to 8 s for any visible form element. Returns True if found."""
+    try:
+        await page.wait_for_selector(
+            "input:not([type='hidden']), select, textarea, button[type='submit'], input[type='submit']",
+            state="visible",
+            timeout=8_000,
+        )
+        return True
+    except PlaywrightTimeout:
+        return False
+
 
 async def _has_captcha(page: Page) -> bool:
     for sel in _CAPTCHA_SELECTORS:
@@ -172,6 +239,148 @@ async def _has_captcha(page: Page) -> bool:
                 return True
         except Exception:
             pass
+    return False
+
+
+async def _bypass_age_gate(page: Page, profile: dict) -> bool:
+    """Try to click through age verification gate. Returns True if one was found."""
+    # First try clicking a button directly
+    for sel in _AGE_GATE_BUTTONS:
+        try:
+            el = await page.query_selector(sel)
+            if el and await el.is_visible():
+                await el.click()
+                await asyncio.sleep(0.8)
+                return True
+        except Exception:
+            pass
+
+    # Check for age gate containers that might have a DOB form
+    for sel in _AGE_GATE_SELECTORS:
+        try:
+            container = await page.query_selector(sel)
+            if container and await container.is_visible():
+                # Try filling DOB in the gate
+                for month_sel in ["select[name*='month' i]", "input[name*='month' i]"]:
+                    m = await page.query_selector(month_sel)
+                    if m and await m.is_visible():
+                        tag = await page.eval_on_selector(month_sel, "el => el.tagName.toLowerCase()")
+                        if tag == "select":
+                            await page.select_option(month_sel, value=profile.get("dob_month", "01"))
+                        else:
+                            await page.fill(month_sel, profile.get("dob_month", "01"))
+                for day_sel in ["select[name*='day' i]", "input[name*='day' i]"]:
+                    d = await page.query_selector(day_sel)
+                    if d and await d.is_visible():
+                        tag = await page.eval_on_selector(day_sel, "el => el.tagName.toLowerCase()")
+                        if tag == "select":
+                            await page.select_option(day_sel, value=profile.get("dob_day", "15"))
+                        else:
+                            await page.fill(day_sel, profile.get("dob_day", "15"))
+                for year_sel in ["select[name*='year' i]", "input[name*='year' i]"]:
+                    y = await page.query_selector(year_sel)
+                    if y and await y.is_visible():
+                        tag = await page.eval_on_selector(year_sel, "el => el.tagName.toLowerCase()")
+                        if tag == "select":
+                            await page.select_option(year_sel, value=profile.get("dob_year", "1990"))
+                        else:
+                            await page.fill(year_sel, profile.get("dob_year", "1990"))
+                # Now find and click submit in the gate
+                for btn_sel in ["button[type='submit']", "input[type='submit']",
+                                 "button:has-text('Submit')", "button:has-text('Verify')",
+                                 "button:has-text('Confirm')", "button:has-text('Enter')"]:
+                    btn = await page.query_selector(btn_sel)
+                    if btn and await btn.is_visible():
+                        await btn.click()
+                        await asyncio.sleep(0.8)
+                        return True
+        except Exception:
+            pass
+    return False
+
+
+async def _enter_rafflecopter(page: Page, profile: dict) -> dict[str, Any] | None:
+    """Handle Rafflecopter widgets. Returns result dict or None if not detected."""
+    # Check for Rafflecopter iframe
+    iframe_el = await page.query_selector(
+        "iframe[src*='rafflecopter'], iframe[src*='widget-prime']"
+    )
+    if iframe_el is None:
+        # Check for inline Rafflecopter (non-iframe embed)
+        rc = await page.query_selector(".rc-entry-method, #rc-container, [class*='rcWidget']")
+        if rc is None:
+            return None
+
+    try:
+        if iframe_el:
+            frame = await iframe_el.content_frame()
+            if frame is None:
+                return None
+            target = frame
+        else:
+            target = page
+
+        # Look for "Enter with Email" or first entry method
+        email_input = await target.query_selector(
+            "input[type='email'], input[name*='email' i], input[placeholder*='email' i]"
+        )
+        if email_input and await email_input.is_visible():
+            await email_input.fill(profile.get("email", ""))
+            await asyncio.sleep(0.3)
+            submit = await target.query_selector(
+                "button[type='submit'], .btn-enter, input[type='submit']"
+            )
+            if submit and await submit.is_visible():
+                await submit.click()
+                await asyncio.sleep(2)
+                return {"status": "entered", "platform": "rafflecopter"}
+    except Exception as exc:
+        logger.debug("Rafflecopter handler error: %s", exc)
+    return None
+
+
+async def _enter_gleam(page: Page, profile: dict) -> dict[str, Any] | None:
+    """Handle Gleam.io giveaway widgets. Returns result dict or None if not detected."""
+    is_gleam = "gleam.io" in page.url or await page.query_selector(
+        "script[src*='gleam'], div[data-gleam], .gleam-widget, #gleam-widget"
+    ) is not None
+    if not is_gleam:
+        return None
+
+    try:
+        # Gleam uses an iframe or direct embed; find the email entry
+        iframe_el = await page.query_selector("iframe[src*='gleam']")
+        target = (await iframe_el.content_frame()) if iframe_el else page
+
+        email_input = await target.query_selector(
+            "input[type='email'], input[name*='email' i]"
+        )
+        if email_input and await email_input.is_visible():
+            await email_input.fill(profile.get("email", ""))
+            await asyncio.sleep(0.3)
+            submit = await target.query_selector(
+                "button[type='submit'], button:has-text('Enter'), .entry-btn"
+            )
+            if submit and await submit.is_visible():
+                await submit.click()
+                await asyncio.sleep(2)
+                return {"status": "entered", "platform": "gleam"}
+    except Exception as exc:
+        logger.debug("Gleam handler error: %s", exc)
+    return None
+
+
+async def _detect_success(page: Page) -> bool:
+    """Return True if the current page shows signs of a successful entry."""
+    url = page.url.lower()
+    if any(p in url for p in _SUCCESS_URL_PATTERNS):
+        return True
+    try:
+        content = (await page.text_content("body") or "").lower()
+        if any(p in content for p in _SUCCESS_TEXT_PATTERNS):
+            return True
+    except Exception:
+        pass
     return False
 
 
@@ -255,6 +464,20 @@ async def _click_submit(page: Page) -> bool:
     return False
 
 
+async def _try_next_step(page: Page) -> bool:
+    """Click a Next/Continue button if visible. Returns True if clicked."""
+    for sel in _NEXT_STEP_SELECTORS:
+        try:
+            el = await page.query_selector(sel)
+            if el and await el.is_visible() and await el.is_enabled():
+                await el.click()
+                await asyncio.sleep(1.0)
+                return True
+        except Exception:
+            pass
+    return False
+
+
 # ── Main entry function ───────────────────────────────────────────────────────
 
 async def fill_and_submit(page: Page, profile: dict[str, str]) -> dict[str, Any]:
@@ -273,48 +496,76 @@ async def fill_and_submit(page: Page, profile: dict[str, str]) -> dict[str, Any]
     dict with 'status' key: "entered" | "captcha" | "no_form" | "error"
     """
     try:
-        # Wait for the page to be reasonably loaded
         await page.wait_for_load_state("domcontentloaded", timeout=15_000)
     except PlaywrightTimeout:
         return {"status": "error", "message": "Page load timeout"}
+
+    # ── Platform-specific handlers first ─────────────────────────────────────
+    rc_result = await _enter_rafflecopter(page, profile)
+    if rc_result:
+        return rc_result
+
+    gleam_result = await _enter_gleam(page, profile)
+    if gleam_result:
+        return gleam_result
+
+    # ── Age gate bypass ───────────────────────────────────────────────────────
+    await _bypass_age_gate(page, profile)
+
+    # ── Wait for dynamic form to load ─────────────────────────────────────────
+    await _wait_for_form(page)
 
     # ── CAPTCHA check ─────────────────────────────────────────────────────────
     if await _has_captcha(page):
         logger.info("CAPTCHA detected on %s", page.url)
         return {"status": "captcha"}
 
-    # ── Fill known profile fields ─────────────────────────────────────────────
-    fields_filled = 0
+    # ── Multi-step form loop (max 4 steps) ────────────────────────────────────
+    total_fields_filled = 0
+    submitted = False
 
-    for profile_key, selectors in _FIELD_SELECTORS.items():
-        value = profile.get(profile_key, "")
-        if not value:
-            continue
-        if await _fill_field(page, selectors, value):
-            fields_filled += 1
+    for step in range(4):
+        fields_filled = 0
 
-    # State is handled separately (value vs. label matching)
-    state_value = profile.get("state", "")
-    if state_value:
-        await _fill_state(page, state_value)
+        for profile_key, selectors in _FIELD_SELECTORS.items():
+            value = profile.get(profile_key, "")
+            if not value:
+                continue
+            if await _fill_field(page, selectors, value):
+                fields_filled += 1
 
-    if fields_filled == 0:
-        logger.info("No form fields found on %s", page.url)
+        state_value = profile.get("state", "")
+        if state_value:
+            await _fill_state(page, state_value)
+
+        await _check_terms(page)
+
+        total_fields_filled += fields_filled
+
+        # Try submitting
+        clicked = await _click_submit(page)
+        if clicked:
+            await asyncio.sleep(1.5)
+            # Check if we landed on a success page
+            if await _detect_success(page):
+                return {"status": "entered", "steps": step + 1}
+            # Check if another step appeared
+            next_clicked = await _try_next_step(page)
+            if not next_clicked:
+                # No next step, no clear success — assume entered
+                submitted = True
+                break
+        else:
+            # No submit found — try next step button
+            next_clicked = await _try_next_step(page)
+            if not next_clicked:
+                break
+
+    if total_fields_filled == 0:
         return {"status": "no_form"}
 
-    # ── Terms checkboxes ──────────────────────────────────────────────────────
-    await _check_terms(page)
-
-    # ── Submit ────────────────────────────────────────────────────────────────
-    clicked = await _click_submit(page)
-    if not clicked:
-        return {"status": "error", "message": "Could not find submit button"}
-
-    # Wait briefly for post-submit navigation or confirmation
-    try:
-        await page.wait_for_load_state("networkidle", timeout=10_000)
-    except PlaywrightTimeout:
-        pass  # Some pages don't fully reload after submission; treat as entered
+    if not submitted:
+        return {"status": "error", "message": "Could not find or complete submit"}
 
     return {"status": "entered"}
 
@@ -325,7 +576,7 @@ async def enter_sweepstake(page: Page, url: str, profile: dict[str, str]) -> dic
     navigation error handling.
     """
     try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=15_000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
     except PlaywrightTimeout:
         return {"status": "error", "message": f"Navigation timeout: {url}"}
     except Exception as exc:

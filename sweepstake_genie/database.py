@@ -22,7 +22,9 @@ CREATE TABLE IF NOT EXISTS sweepstakes (
     discovered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     status        TEXT NOT NULL DEFAULT 'pending',
     entered_at    TIMESTAMP,
-    error_message TEXT
+    error_message TEXT,
+    entry_count   INTEGER NOT NULL DEFAULT 0,
+    allows_daily  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_sweepstakes_status ON sweepstakes (status);
@@ -67,6 +69,15 @@ class Database:
         """Create tables if they do not exist yet."""
         with self._conn() as conn:
             conn.executescript(_DDL)
+            # Migration: add new columns to existing databases
+            for col_def in [
+                "ALTER TABLE sweepstakes ADD COLUMN entry_count INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE sweepstakes ADD COLUMN allows_daily INTEGER NOT NULL DEFAULT 0",
+            ]:
+                try:
+                    conn.execute(col_def)
+                except Exception:
+                    pass  # column already exists
 
     @staticmethod
     def _now() -> str:
@@ -104,8 +115,11 @@ class Database:
         """Mark a sweepstake as successfully entered."""
         with self._conn() as conn:
             conn.execute(
-                "UPDATE sweepstakes SET status = ?, entered_at = ? WHERE url = ?",
-                (STATUS_ENTERED, self._now(), url),
+                """UPDATE sweepstakes
+                   SET status='entered', entered_at=CURRENT_TIMESTAMP,
+                       entry_count=entry_count+1
+                 WHERE url=?""",
+                (url,),
             )
 
     def mark_skipped(self, url: str, reason: str = "") -> None:
@@ -132,6 +146,27 @@ class Database:
                 (STATUS_ERROR, message, url),
             )
 
+    def mark_allows_daily(self, url: str) -> None:
+        """Mark a sweepstake as allowing daily re-entry."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE sweepstakes SET allows_daily=1 WHERE url=?", (url,)
+            )
+
+    def get_due_for_reentry(self) -> list[dict]:
+        """Return sweepstakes that allow daily entry and haven't been entered today."""
+        with self._conn() as conn:
+            cur = conn.execute(
+                """SELECT id, url, title, source
+                     FROM sweepstakes
+                    WHERE allows_daily=1
+                      AND status='entered'
+                      AND (entered_at IS NULL
+                           OR DATE(entered_at) < DATE('now', 'localtime'))
+                    ORDER BY id""",
+            )
+            return [dict(r) for r in cur.fetchall()]
+
     def get_stats(self) -> dict[str, int]:
         """
         Return a dict with counts per status and a 'total' key.
@@ -148,6 +183,11 @@ class Database:
             total_row = conn.execute(
                 "SELECT COUNT(*) AS cnt FROM sweepstakes"
             ).fetchone()
+            daily_due = conn.execute(
+                """SELECT COUNT(*) FROM sweepstakes
+                    WHERE allows_daily=1 AND status='entered'
+                      AND (entered_at IS NULL OR DATE(entered_at) < DATE('now','localtime'))"""
+            ).fetchone()[0]
 
         stats: dict[str, int] = {
             STATUS_PENDING: 0,
@@ -156,6 +196,7 @@ class Database:
             STATUS_CAPTCHA: 0,
             STATUS_ERROR:   0,
             "total": total_row["cnt"] if total_row else 0,
+            "daily_due": daily_due,
         }
         for row in rows:
             stats[row["status"]] = row["cnt"]
