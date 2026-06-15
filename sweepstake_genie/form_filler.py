@@ -1671,6 +1671,13 @@ _LINK_SKIP_HOSTS: frozenset[str] = frozenset([
     "google.com", "google.co.uk",
 ])
 
+# Keywords that signal a link is to an actual sweepstakes entry page
+_SWEEP_LINK_KEYWORDS: frozenset[str] = frozenset([
+    "sweepstake", "giveaway", "contest", "enter", "prize",
+    "instant-win", "instant_win", "drawing", "sweeps", "promotion", "promo",
+    "win-", "-win", "/win", "raffle",
+])
+
 
 async def _follow_article_sweepstake_link(page: Page) -> bool:
     """
@@ -1718,6 +1725,11 @@ async def _follow_article_sweepstake_link(page: Page) -> bool:
                         continue
                     text = (await link.text_content() or "").strip()
                     if len(text) < 6:
+                        continue
+                    # Only follow links that look like a sweepstakes entry page
+                    text_lower = text.lower()
+                    url_lower  = full_url.lower()
+                    if not any(kw in text_lower or kw in url_lower for kw in _SWEEP_LINK_KEYWORDS):
                         continue
                     logger.info("Aggregator blog redirect: %s → %s", page.url, full_url)
                     await link.click()
@@ -1877,9 +1889,15 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
 
     # ── Aggregator blog redirect ──────────────────────────────────────────────
     # Freebie Shark, Hip2Save, etc. post articles that link to the actual form.
-    # Follow the embedded external link to reach the real entry page.
+    # Follow the embedded external sweepstakes link to reach the real entry page.
+    # If no qualifying link is found (tips/advice article), return no_form immediately
+    # so we don't mistakenly detect the blog's newsletter CAPTCHA as a sweepstake.
     if not await _has_form_fields(page):
-        await _follow_article_sweepstake_link(page)
+        _current_host = urlparse(page.url).netloc.lower()
+        _host_clean   = _current_host[4:] if _current_host.startswith("www.") else _current_host
+        if _host_clean in _AGGREGATOR_BLOG_DOMAINS:
+            if not await _follow_article_sweepstake_link(page):
+                return {"status": "no_form"}
 
     # ── "Enter Now" link follower ──────────────────────────────────────────────
     # Some aggregators or landing pages require clicking through to the form.

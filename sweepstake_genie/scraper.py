@@ -96,6 +96,30 @@ _SWEEP_KEYWORDS = frozenset([
     "instant win", "instant-win",
 ])
 
+# Title patterns that indicate advice/news articles rather than sweepstake entries.
+# These are common in RSS feeds from sweepstaking BLOGS that mix entry listings
+# with tips, guides, and news posts.
+_EXCLUDE_TITLE_PATTERNS = frozenset([
+    # Instructional / how-to
+    "quick tip", "top tip", "tips to ", "tips for ",
+    "how to ", "how do ", "how i ", "how you ",
+    "why you", "why i ", "why we ", "why track",
+    "guide to", "guide for", "getting started",
+    "what is ", "what are ", "best practice",
+    # Events / webinars / podcasts
+    "masterclass", "webinar", " meeting", "club meeting",
+    "virtual contest", "podcast", "listen & learn", "listen and learn",
+    # Site or tool news
+    " upgrade", "just launched", "new feature", "website upgrade",
+    "enewsletter", "newsletter", "subscribe to ",
+    # Explicit non-entry signals
+    "leave a review", "write a review",
+    "follow us on", "join us on",
+    "sweepstakes posts",   # category/tag page link
+    "fake contest", "scam alert",
+    "i win every",         # personal story/advice article
+])
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Source configuration tables  ← add new sources here, no new functions needed
@@ -739,7 +763,15 @@ def _should_skip(url: str) -> bool:
 
 def _looks_like_sweepstake(title: str, url: str) -> bool:
     """Return True if the title or URL path contains a sweepstakes keyword."""
-    combined = (title + " " + urlparse(url).path).lower()
+    title_stripped = title.strip()
+    # Very short titles are navigation items / category labels, not sweepstakes
+    if len(title_stripped) < 10:
+        return False
+    title_lower = title_stripped.lower()
+    # Filter out advice/news/event articles from sweepstaking blogs
+    if any(pat in title_lower for pat in _EXCLUDE_TITLE_PATTERNS):
+        return False
+    combined = (title_lower + " " + urlparse(url).path).lower()
     return any(kw in combined for kw in _SWEEP_KEYWORDS)
 
 
