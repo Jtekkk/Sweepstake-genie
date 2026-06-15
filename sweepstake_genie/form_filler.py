@@ -15,6 +15,7 @@ import json
 import logging
 import random
 from typing import Any
+from urllib.parse import urlparse, urljoin
 
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeout
 
@@ -1640,6 +1641,99 @@ async def _try_next_step(page: Page) -> bool:
     return False
 
 
+# Aggregator blog sites whose article pages embed an external sweepstakes link
+# in the article body.  When we land on one of these pages, we follow the first
+# external link inside the post content to reach the actual entry form.
+_AGGREGATOR_BLOG_DOMAINS: frozenset[str] = frozenset([
+    "freebieshark.com", "freebiesharks.com",
+    "iheartgiveaways.net", "thesweepstakesguy.com",
+    "luckyattitudes.com", "thefrugalfreebies.com",
+    "hip2save.com", "freebies4mom.com", "simplyfreestuff.com",
+    "pennypinchinmom.com", "thriftynorthwestmom.com",
+    "missfrugalmommy.com", "moneysavingmom.com",
+    "contestblogger.com", "sweepstakesfanatics.com",
+    "contestqueen.com", "giveawaymonkey.com",
+    "winningbecause.com", "sweepstakescrazies.com",
+    "contestchest.com", "contestgirl.com", "thegiveawaygeek.com",
+    "contestalley.com", "nationalfamilyfun.com", "thewinningmom.com",
+    "sweepstakesinsider.com", "singlemomsincome.com",
+    "dailycheapskate.com", "budgetsavvydiva.com", "thriftyjinxy.com",
+    "sweepstakeswithkathy.com", "giveawaybase.com", "winbigpicture.com",
+    "winbigpicture.com",
+])
+
+# Social/shortener domains to skip when extracting article links
+_LINK_SKIP_HOSTS: frozenset[str] = frozenset([
+    "twitter.com", "x.com", "instagram.com", "facebook.com", "fb.com",
+    "tiktok.com", "youtube.com", "youtu.be", "pinterest.com", "reddit.com",
+    "t.co", "bit.ly", "ow.ly", "buff.ly", "tinyurl.com",
+    "amazon.com", "amzn.to", "ebay.com", "etsy.com",
+    "google.com", "google.co.uk",
+])
+
+
+async def _follow_article_sweepstake_link(page: Page) -> bool:
+    """
+    On aggregator blog article pages, find the first external link inside the
+    post content area and navigate to it.  Returns True if navigation occurred.
+
+    These sites post articles *about* a sweepstake with a hyperlink in the body
+    (e.g. Freebie Shark) — there is no entry form on the article page itself.
+    """
+    try:
+        host = urlparse(page.url).netloc.lower()
+        host = host[4:] if host.startswith("www.") else host
+        if host not in _AGGREGATOR_BLOG_DOMAINS:
+            return False
+    except Exception:
+        return False
+
+    _CONTENT_SELECTORS = [
+        ".entry-content", ".post-content", ".article-content",
+        ".post-body", ".entry-body", ".single-content",
+        "article", ".content-area", "main",
+    ]
+    current_host = urlparse(page.url).netloc.lower()
+
+    for container_sel in _CONTENT_SELECTORS:
+        try:
+            container = await page.query_selector(container_sel)
+            if not container:
+                continue
+            links = await container.query_selector_all("a[href]")
+            for link in links:
+                try:
+                    href = (await link.get_attribute("href") or "").strip()
+                    if not href or href.startswith(("#", "javascript:", "mailto:")):
+                        continue
+                    full_url = urljoin(page.url, href)
+                    link_host = urlparse(full_url).netloc.lower()
+                    clean_host = link_host[4:] if link_host.startswith("www.") else link_host
+                    # Must be a different external domain, not social/ad junk
+                    if not link_host or link_host == current_host:
+                        continue
+                    if clean_host in _LINK_SKIP_HOSTS:
+                        continue
+                    if clean_host in _AGGREGATOR_BLOG_DOMAINS:
+                        continue
+                    text = (await link.text_content() or "").strip()
+                    if len(text) < 6:
+                        continue
+                    logger.info("Aggregator blog redirect: %s → %s", page.url, full_url)
+                    await link.click()
+                    try:
+                        await page.wait_for_load_state("domcontentloaded", timeout=12_000)
+                    except PlaywrightTimeout:
+                        pass
+                    await _wait_for_form(page)
+                    return True
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    return False
+
+
 async def _try_click_through(page: Page) -> bool:
     """
     For interstitial pages with no form fields — click any visible entry/nav
@@ -1780,6 +1874,12 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
     iframe_result = await _enter_generic_iframe(page, profile)
     if iframe_result:
         return iframe_result
+
+    # ── Aggregator blog redirect ──────────────────────────────────────────────
+    # Freebie Shark, Hip2Save, etc. post articles that link to the actual form.
+    # Follow the embedded external link to reach the real entry page.
+    if not await _has_form_fields(page):
+        await _follow_article_sweepstake_link(page)
 
     # ── "Enter Now" link follower ──────────────────────────────────────────────
     # Some aggregators or landing pages require clicking through to the form.
