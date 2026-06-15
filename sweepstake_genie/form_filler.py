@@ -169,6 +169,18 @@ _SUBMIT_SELECTORS = [
     "button:has-text('Enter to Win')",
     "input[value*='Enter' i]",
     "input[value*='Submit' i]",
+    "button:has-text('Sign Up')",
+    "button:has-text('Register')",
+    "button:has-text('Join Now')",
+    "button:has-text('Join')",
+    "button:has-text('Subscribe')",
+    "button:has-text('Confirm')",
+    "button:has-text('Get Started')",
+    "button:has-text('Claim')",
+    "button:has-text('Yes, Enter Me')",
+    "input[value*='Sign Up' i]",
+    "input[value*='Register' i]",
+    "input[value*='Join' i]",
 ]
 
 # Terms/consent checkboxes
@@ -200,6 +212,8 @@ _NEXT_STEP_SELECTORS = [
 _SUCCESS_URL_PATTERNS = [
     "/thank", "/thanks", "/success", "/confirm", "/thank-you",
     "/thankyou", "/entry-complete", "/entered", "/congratulations",
+    "/complete", "/done", "/registered", "/confirmation",
+    "/receipt", "submitted=true", "success=1", "entered=1",
 ]
 
 # Success page text fragments (lower-cased)
@@ -210,6 +224,11 @@ _SUCCESS_TEXT_PATTERNS = [
     "successfully entered", "successfully submitted",
     "good luck", "submission received", "congratulations",
     "you have successfully", "your entry has been",
+    "thanks for entering", "thanks for your entry",
+    "you've been entered", "you have entered",
+    "your entry is confirmed", "your submission has been received",
+    "you're in", "you are in the draw",
+    "we received your entry", "entry has been received",
 ]
 
 # Expired/closed sweepstake text fragments (lower-cased)
@@ -292,6 +311,18 @@ _GENDER_SELECT_SELECTORS = [
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+async def _has_form_fields(page: Page) -> bool:
+    """Return True if visible form input fields are already on the page."""
+    try:
+        for sel in ["input[type='email']", "input[type='text']:not([type='hidden'])", "input[type='tel']"]:
+            el = await page.query_selector(sel)
+            if el and await el.is_visible():
+                return True
+    except Exception:
+        pass
+    return False
+
 
 async def _wait_for_form(page: Page) -> bool:
     """Wait up to 8 s for any visible form element. Returns True if found."""
@@ -1464,6 +1495,39 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
     iframe_result = await _enter_generic_iframe(page, profile)
     if iframe_result:
         return iframe_result
+
+    # ── "Enter Now" link follower ──────────────────────────────────────────────
+    # Some aggregators store their own detail page URL; click through to the form.
+    if not await _has_form_fields(page):
+        _ENTER_LINK_SELECTORS = [
+            "a:has-text('Enter Now')",
+            "a:has-text('Enter Here')",
+            "a:has-text('Click to Enter')",
+            "a:has-text('Enter Sweepstakes')",
+            "a:has-text('Enter the Sweepstakes')",
+            "a:has-text('Enter Giveaway')",
+            "a:has-text('Enter to Win')",
+            "a:has-text('Enter the Giveaway')",
+            "a:has-text('Enter the Contest')",
+            "a.enter-link",
+            "a[class*='enter' i][href]",
+            "[data-action='enter'][href]",
+        ]
+        for sel in _ENTER_LINK_SELECTORS:
+            try:
+                el = await page.query_selector(sel)
+                if el and await el.is_visible():
+                    href = await el.get_attribute("href") or ""
+                    if href and not href.startswith("#"):
+                        await el.click()
+                        try:
+                            await page.wait_for_load_state("domcontentloaded", timeout=12_000)
+                        except PlaywrightTimeout:
+                            pass
+                        await _wait_for_form(page)
+                        break
+            except Exception:
+                pass
 
     # ── Age gate bypass ───────────────────────────────────────────────────────
     await _bypass_age_gate(page, profile)

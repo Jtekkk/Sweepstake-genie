@@ -93,7 +93,16 @@ async def _enter_worker(
             else:
                 db.mark_error(url, result.get("message", "unknown"))
                 icon = "[red]✗[/red]"
-            console.print(f"  {icon} [{idx}/{total}] {title}")
+            detail = ""
+            if status == "captcha":
+                detail = " [captcha]"
+            elif status == "expired":
+                detail = " [expired]"
+            elif status == "no_form":
+                detail = " [no form]"
+            elif status == "error":
+                detail = f" [{result.get('message', 'error')[:40]}]"
+            console.print(f"  {icon} [{idx}/{total}] {title}{detail}")
         except Exception as exc:
             db.mark_error(url, str(exc))
             logger.error("[%d/%d] %s — %s", idx, total, title, exc)

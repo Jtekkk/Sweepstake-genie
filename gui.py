@@ -155,6 +155,53 @@ def _load_history(db_path: str, limit: int = 100) -> list[dict[str, Any]]:
         return []
 
 
+def _load_captcha_queue(db_path: str) -> list[dict[str, Any]]:
+    """Return all entries with status='captcha' from *db_path*."""
+    import sqlite3
+
+    path = Path(db_path)
+    if not path.exists():
+        return []
+    try:
+        conn = sqlite3.connect(str(path), timeout=5)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, url, title, source FROM sweepstakes WHERE status='captcha' ORDER BY id DESC"
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def _reset_captcha_to_pending(db_path: str, url: str) -> None:
+    """Reset a single captcha entry back to pending so it's retried."""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5)
+        conn.execute("UPDATE sweepstakes SET status='pending', error_message=NULL WHERE url=?", (url,))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _mark_captcha_entered(db_path: str, url: str) -> None:
+    """Mark a captcha entry as manually entered."""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5)
+        conn.execute(
+            "UPDATE sweepstakes SET status='entered', entered_at=CURRENT_TIMESTAMP, "
+            "entry_count=entry_count+1 WHERE url=?",
+            (url,),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 def _load_stats(db_path: str) -> dict[str, int]:
     """Return status counts from *db_path*."""
     import sqlite3
@@ -228,11 +275,13 @@ class SweepstakeGenieApp(ctk.CTk):
         self._tabview.add("Profile")
         self._tabview.add("Run")
         self._tabview.add("History")
+        self._tabview.add("CAPTCHA Queue")
         self._tabview.add("Settings")
 
         self._build_profile_tab(self._tabview.tab("Profile"))
         self._build_run_tab(self._tabview.tab("Run"))
         self._build_history_tab(self._tabview.tab("History"))
+        self._build_captcha_tab(self._tabview.tab("CAPTCHA Queue"))
         self._build_settings_tab(self._tabview.tab("Settings"))
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -620,8 +669,18 @@ class SweepstakeGenieApp(ctk.CTk):
                                     db.mark_error(url, msg)
                                     counts["error"] += 1
                                     icon = "✗"
+                                detail = ""
+                                if status == "captcha":
+                                    detail = " [captcha]"
+                                elif status == "expired":
+                                    detail = " [expired]"
+                                elif status == "no_form":
+                                    detail = " [no form]"
+                                elif status == "error":
+                                    msg = result.get("message", "error")
+                                    detail = f" [{msg[:40]}]"
                                 self._log_queue.put(
-                                    f"[{_ts()}] {icon} [{idx}/{total}] {title}"
+                                    f"[{_ts()}] {icon} [{idx}/{total}] {title}{detail}"
                                 )
                                 self._log_queue.put(("stats_refresh", None))
                                 self._log_queue.put(("progress", idx / total))
@@ -772,8 +831,18 @@ class SweepstakeGenieApp(ctk.CTk):
                                     db.mark_error(url, msg)
                                     counts["error"] += 1
                                     icon = "✗"
+                                detail = ""
+                                if status == "captcha":
+                                    detail = " [captcha]"
+                                elif status == "expired":
+                                    detail = " [expired]"
+                                elif status == "no_form":
+                                    detail = " [no form]"
+                                elif status == "error":
+                                    msg = result.get("message", "error")
+                                    detail = f" [{msg[:40]}]"
                                 self._log_queue.put(
-                                    f"[{_ts()}] {icon} [{idx}/{total}] {title}"
+                                    f"[{_ts()}] {icon} [{idx}/{total}] {title}{detail}"
                                 )
                                 self._log_queue.put(("stats_refresh", None))
                                 self._log_queue.put(("progress", idx / total))
@@ -907,7 +976,177 @@ class SweepstakeGenieApp(ctk.CTk):
         self._history_count_lbl.configure(text=f"{len(rows)} entries shown")
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Tab 4 — Settings
+    # Tab 4 — CAPTCHA Queue
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _build_captcha_tab(self, parent: ctk.CTkFrame) -> None:
+        # Header explanation
+        ctk.CTkLabel(
+            parent,
+            text=(
+                "Sweepstakes blocked by a CAPTCHA are listed below.\n"
+                "Open each URL in your browser, solve the CAPTCHA manually, "
+                "then mark it Entered or click Retry to re-queue it for automation."
+            ),
+            text_color="#aaaaaa",
+            wraplength=800,
+            justify="left",
+        ).pack(anchor="w", padx=12, pady=(10, 4))
+
+        # Toolbar
+        btn_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=10, pady=(0, 6))
+
+        ctk.CTkButton(
+            btn_frame, text="Refresh", width=90,
+            command=self._refresh_captcha_queue,
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            btn_frame, text="Open All in Browser", width=160,
+            command=self._captcha_open_all,
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            btn_frame, text="Retry All (re-queue)", width=160,
+            fg_color="#555555", hover_color="#666666",
+            command=self._captcha_retry_all,
+        ).pack(side="left", padx=(0, 6))
+
+        self._captcha_count_lbl = ctk.CTkLabel(btn_frame, text="", text_color="#aaaaaa")
+        self._captcha_count_lbl.pack(side="left", padx=10)
+
+        # Treeview
+        tree_frame = ctk.CTkFrame(parent)
+        tree_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        columns = ("title", "url", "source")
+        self._captcha_tree = ttk.Treeview(
+            tree_frame, columns=columns, show="headings", selectmode="browse",
+        )
+        self._captcha_tree.heading("title",  text="Title")
+        self._captcha_tree.heading("url",    text="URL")
+        self._captcha_tree.heading("source", text="Source")
+
+        self._captcha_tree.column("title",  width=260, minwidth=100)
+        self._captcha_tree.column("url",    width=320, minwidth=120)
+        self._captcha_tree.column("source", width=120, minwidth=60, anchor="center")
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical",   command=self._captcha_tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self._captcha_tree.xview)
+        self._captcha_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        self._captcha_tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        tree_frame.rowconfigure(0, weight=1)
+        tree_frame.columnconfigure(0, weight=1)
+
+        # Per-row action buttons
+        action_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        action_frame.pack(fill="x", padx=10, pady=(0, 8))
+
+        ctk.CTkButton(
+            action_frame, text="Open Selected in Browser", width=200,
+            command=self._captcha_open_selected,
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            action_frame, text="Mark Selected as Entered", width=200,
+            fg_color="#1a7a1a", hover_color="#228b22",
+            command=self._captcha_mark_entered,
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            action_frame, text="Retry Selected", width=140,
+            fg_color="#555555", hover_color="#666666",
+            command=self._captcha_retry_selected,
+        ).pack(side="left")
+
+    def _refresh_captcha_queue(self) -> None:
+        rows = _load_captcha_queue(self._db_path)
+        for item in self._captcha_tree.get_children():
+            self._captcha_tree.delete(item)
+        for row in rows:
+            self._captcha_tree.insert(
+                "", "end",
+                iid=row["url"],
+                values=(
+                    (row.get("title") or row["url"])[:80],
+                    row["url"],
+                    row.get("source") or "",
+                ),
+            )
+        count = len(rows)
+        self._captcha_count_lbl.configure(
+            text=f"{count} CAPTCHA-blocked {'entry' if count == 1 else 'entries'}"
+        )
+        # Also update the stats badge on the tab label if count > 0
+        tab_text = f"CAPTCHA Queue ({count})" if count else "CAPTCHA Queue"
+        # CTkTabview doesn't support renaming, so just update the label widget
+        try:
+            self._tabview.set("CAPTCHA Queue")
+        except Exception:
+            pass
+
+    def _captcha_get_selected_url(self) -> str | None:
+        sel = self._captcha_tree.selection()
+        if not sel:
+            messagebox.showinfo("No Selection", "Select a row first.", parent=self)
+            return None
+        return sel[0]  # iid is the url
+
+    def _captcha_open_selected(self) -> None:
+        url = self._captcha_get_selected_url()
+        if url:
+            import webbrowser
+            webbrowser.open(url)
+
+    def _captcha_mark_entered(self) -> None:
+        url = self._captcha_get_selected_url()
+        if url:
+            _mark_captcha_entered(self._db_path, url)
+            self._refresh_captcha_queue()
+
+    def _captcha_retry_selected(self) -> None:
+        url = self._captcha_get_selected_url()
+        if url:
+            _reset_captcha_to_pending(self._db_path, url)
+            self._refresh_captcha_queue()
+
+    def _captcha_open_all(self) -> None:
+        import webbrowser
+        rows = _load_captcha_queue(self._db_path)
+        if not rows:
+            messagebox.showinfo("Empty Queue", "No CAPTCHA-blocked entries.", parent=self)
+            return
+        if len(rows) > 20:
+            answer = messagebox.askyesno(
+                "Open All?",
+                f"This will open {len(rows)} browser tabs. Continue?",
+                parent=self,
+            )
+            if not answer:
+                return
+        for row in rows:
+            webbrowser.open(row["url"])
+
+    def _captcha_retry_all(self) -> None:
+        rows = _load_captcha_queue(self._db_path)
+        if not rows:
+            messagebox.showinfo("Empty Queue", "No CAPTCHA-blocked entries.", parent=self)
+            return
+        for row in rows:
+            _reset_captcha_to_pending(self._db_path, row["url"])
+        self._refresh_captcha_queue()
+        messagebox.showinfo(
+            "Done",
+            f"{len(rows)} entries moved back to pending — they will be retried on the next run.",
+            parent=self,
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Tab 5 — Settings
     # ─────────────────────────────────────────────────────────────────────────
 
     def _build_settings_tab(self, parent: ctk.CTkFrame) -> None:
@@ -1161,6 +1400,7 @@ class SweepstakeGenieApp(ctk.CTk):
                         self._set_run_status(final_status)
                         self._set_buttons_running(False)
                         self._refresh_stats()
+                        self._refresh_captcha_queue()
                     elif kind == "status":
                         self._set_run_status(value)
                     elif kind == "progress":
