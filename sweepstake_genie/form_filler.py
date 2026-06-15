@@ -132,20 +132,33 @@ _FIELD_SELECTORS: dict[str, list[str]] = {
     "dob_month": [
         "select[name*='month' i]",
         "select[id*='month' i]",
+        "select[name*='dob_m' i]",
+        "select[name*='birth_m' i]",
         "input[name*='month' i]",
         "input[id*='month' i]",
+        "input[name*='dob_m' i]",
+        "input[name*='birth_m' i]",
     ],
     "dob_day": [
         "select[name*='day' i]",
         "select[id*='day' i]",
+        "select[name*='dob_d' i]",
+        "select[name*='birth_d' i]",
         "input[name*='day' i]",
         "input[id*='day' i]",
+        "input[name*='dob_d' i]",
+        "input[name*='birth_d' i]",
     ],
     "dob_year": [
         "select[name*='year' i]",
         "select[id*='year' i]",
+        "select[name*='dob_y' i]",
+        "select[name*='birth_y' i]",
         "input[name*='year' i]",
         "input[id*='year' i]",
+        "input[name*='dob_y' i]",
+        "input[name*='birth_y' i]",
+        "input[placeholder*='YYYY' i]",
     ],
 }
 
@@ -202,11 +215,34 @@ _NEXT_STEP_SELECTORS = [
     "button:has-text('Next Step')",
     "button:has-text('Next Page')",
     "button:has-text('Proceed')",
+    "button:has-text('Start')",
+    "button:has-text('Begin')",
+    "button:has-text('Go')",
+    "button:has-text('I Agree')",
+    "button:has-text('I agree')",
+    "button:has-text('Accept')",
+    "button:has-text('Yes')",
+    "button:has-text('Click Here')",
+    "button:has-text(\"Let's Go\")",
+    "button:has-text('OK')",
+    "button:has-text('Okay')",
+    "a:has-text('Next')",
+    "a:has-text('Continue')",
+    "a:has-text('Next Step')",
+    "a:has-text('Proceed')",
+    "a:has-text('Start')",
+    "a:has-text('Begin')",
     "input[value*='Next' i]",
     "input[value*='Continue' i]",
+    "input[value*='Start' i]",
+    "input[value*='Begin' i]",
+    "input[value*='Proceed' i]",
     ".btn-next", ".next-step", ".next-btn",
     "[data-action='next']",
     "button[class*='next' i]",
+    "button[class*='continue' i]",
+    "a[class*='next' i]",
+    "a[class*='continue' i]",
 ]
 
 # Success URL path fragments
@@ -230,6 +266,12 @@ _SUCCESS_TEXT_PATTERNS = [
     "your entry is confirmed", "your submission has been received",
     "you're in", "you are in the draw",
     "we received your entry", "entry has been received",
+    # Already-entered is still a success — user is in the draw
+    "already entered", "already registered",
+    "you've already entered", "you have already entered",
+    "you already entered", "already submitted an entry",
+    "duplicate entry", "entry already exists",
+    "you are already entered", "already been entered",
 ]
 
 # Expired/closed sweepstake text fragments (lower-cased)
@@ -737,6 +779,69 @@ async def _fill_full_name(page: Page, profile: dict[str, str]) -> bool:
         except Exception:
             pass
     return False
+
+
+async def _fill_dob_date_input(page: Page, profile: dict[str, str]) -> int:
+    """
+    Fill ``input[type='date']`` and combined DOB text fields (e.g. name*='dob').
+    Separate month/day/year selects are handled by _FIELD_SELECTORS; this
+    function handles the common case of a *single* DOB field.
+    Returns the number of fields filled.
+    """
+    month = profile.get("dob_month", "").zfill(2)
+    day   = profile.get("dob_day",   "").zfill(2)
+    year  = profile.get("dob_year",  "")
+    if not (month and day and year):
+        return 0
+
+    filled   = 0
+    iso_date = f"{year}-{month}-{day}"   # YYYY-MM-DD  (HTML date input)
+    mdy_date = f"{month}/{day}/{year}"   # MM/DD/YYYY  (common text mask)
+
+    # ── input[type='date'] ────────────────────────────────────────────────
+    for el in await page.query_selector_all("input[type='date']"):
+        try:
+            if not await el.is_visible() or not await el.is_enabled():
+                continue
+            if await el.input_value():
+                continue
+            await el.fill(iso_date)
+            await _human_delay()
+            filled += 1
+        except Exception as exc:
+            logger.debug("fill_dob date-input error: %s", exc)
+
+    # ── Combined DOB text inputs ───────────────────────────────────────────
+    _DOB_COMBINED_SELECTORS = [
+        "input[name*='dob' i]:not([type='hidden']):not([type='date'])",
+        "input[id*='dob' i]:not([type='hidden']):not([type='date'])",
+        "input[name*='birthday' i]:not([type='hidden']):not([type='date'])",
+        "input[id*='birthday' i]:not([type='hidden']):not([type='date'])",
+        "input[name*='birthdate' i]:not([type='hidden']):not([type='date'])",
+        "input[name*='birth_date' i]:not([type='hidden']):not([type='date'])",
+        "input[name*='dateofbirth' i]:not([type='hidden']):not([type='date'])",
+        "input[placeholder*='MM/DD/YYYY' i]",
+        "input[placeholder*='Date of Birth' i]",
+        "input[placeholder*='Birth Date' i]",
+        "input[placeholder*='Birthday' i]",
+    ]
+    for sel in _DOB_COMBINED_SELECTORS:
+        try:
+            el = await page.query_selector(sel)
+            if el is None or not await el.is_visible() or not await el.is_enabled():
+                continue
+            if await el.input_value():
+                continue
+            placeholder = (await el.get_attribute("placeholder") or "").upper()
+            value = iso_date if placeholder.startswith("YYYY") else mdy_date
+            await el.triple_click()
+            await el.fill(value)
+            await _human_delay()
+            filled += 1
+        except Exception as exc:
+            logger.debug("fill_dob combined sel=%s error: %s", sel, exc)
+
+    return filled
 
 
 async def _handle_gender(page: Page, gender: str = "M") -> None:
@@ -1535,6 +1640,47 @@ async def _try_next_step(page: Page) -> bool:
     return False
 
 
+async def _try_click_through(page: Page) -> bool:
+    """
+    For interstitial pages with no form fields — click any visible entry/nav
+    link or button to advance toward the actual form.  Returns True if clicked.
+    """
+    _INTERSTITIAL_SELECTORS = [
+        # Explicit enter links
+        "a:has-text('Enter Now')", "a:has-text('Enter Here')",
+        "a:has-text('Click to Enter')", "a:has-text('Click Here to Enter')",
+        "a:has-text('Enter the Sweepstakes')", "a:has-text('Enter Sweepstakes')",
+        "a:has-text('Enter to Win')", "a:has-text('Enter Giveaway')",
+        "a:has-text('Enter the Giveaway')", "a:has-text('Enter the Contest')",
+        "a:has-text('Enter the Drawing')",
+        "button:has-text('Enter Now')", "button:has-text('Enter Here')",
+        "button:has-text('Enter to Win')", "button:has-text('Enter Sweepstakes')",
+        # Generic forward-navigation links
+        "a:has-text('Get Started')", "a:has-text('Start')",
+        "a:has-text('Begin')", "a:has-text('Continue')",
+        "a:has-text('Next')", "a:has-text('Proceed')",
+        "a:has-text('Go')",
+        # Class-based CTAs
+        "a[class*='enter' i]", "a[class*='cta' i]",
+        ".enter-btn", ".cta-btn", ".entry-btn",
+        "a[class*='btn'][href]", "a[class*='button'][href]",
+    ]
+    for sel in _INTERSTITIAL_SELECTORS:
+        try:
+            el = await page.query_selector(sel)
+            if el and await el.is_visible():
+                await el.click()
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=10_000)
+                except PlaywrightTimeout:
+                    pass
+                await asyncio.sleep(1.0)
+                return True
+        except Exception:
+            pass
+    return False
+
+
 # ── Main entry function ───────────────────────────────────────────────────────
 
 async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=None) -> dict[str, Any]:
@@ -1636,35 +1782,42 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
         return iframe_result
 
     # ── "Enter Now" link follower ──────────────────────────────────────────────
-    # Some aggregators store their own detail page URL; click through to the form.
+    # Some aggregators or landing pages require clicking through to the form.
+    # We allow relative URLs and JS-triggered links (no href restriction).
     if not await _has_form_fields(page):
         _ENTER_LINK_SELECTORS = [
             "a:has-text('Enter Now')",
             "a:has-text('Enter Here')",
             "a:has-text('Click to Enter')",
+            "a:has-text('Click Here to Enter')",
             "a:has-text('Enter Sweepstakes')",
             "a:has-text('Enter the Sweepstakes')",
             "a:has-text('Enter Giveaway')",
             "a:has-text('Enter to Win')",
             "a:has-text('Enter the Giveaway')",
             "a:has-text('Enter the Contest')",
+            "a:has-text('Enter the Drawing')",
+            "a:has-text('Enter Drawing')",
+            "button:has-text('Enter Now')",
+            "button:has-text('Enter Here')",
+            "button:has-text('Enter the Sweepstakes')",
+            "button:has-text('Click Here to Enter')",
             "a.enter-link",
-            "a[class*='enter' i][href]",
-            "[data-action='enter'][href]",
+            "a[class*='enter' i]",
+            "[data-action='enter']",
+            ".enter-btn", ".cta-enter",
         ]
         for sel in _ENTER_LINK_SELECTORS:
             try:
                 el = await page.query_selector(sel)
                 if el and await el.is_visible():
-                    href = await el.get_attribute("href") or ""
-                    if href and href.startswith(("http://", "https://")):
-                        await el.click()
-                        try:
-                            await page.wait_for_load_state("domcontentloaded", timeout=12_000)
-                        except PlaywrightTimeout:
-                            pass
-                        await _wait_for_form(page)
-                        break
+                    await el.click()
+                    try:
+                        await page.wait_for_load_state("domcontentloaded", timeout=12_000)
+                    except PlaywrightTimeout:
+                        pass
+                    await _wait_for_form(page)
+                    break
             except Exception:
                 pass
 
@@ -1710,11 +1863,18 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
         if not solved:
             return {"status": "captcha"}
 
-    # ── Multi-step form loop (max 4 steps) ────────────────────────────────────
+    # ── Multi-step form loop (max 8 steps) ────────────────────────────────────
     total_fields_filled = 0
     submitted = False
 
-    for step in range(4):
+    for step in range(8):
+        # Check for expiry/success on steps after the first
+        if step > 0:
+            if await _detect_success(page):
+                return {"status": "entered", "steps": step}
+            if await _is_expired(page):
+                return {"status": "expired"}
+
         fields_filled = 0
 
         for profile_key, selectors in _FIELD_SELECTORS.items():
@@ -1727,6 +1887,10 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
         state_value = profile.get("state", "")
         if state_value:
             await _fill_state(page, state_value)
+
+        # date-type DOB inputs and combined DOB text fields
+        dob_filled = await _fill_dob_date_input(page, profile)
+        fields_filled += dob_filled
 
         # Full name field (fallback when first+last fields not found)
         if fields_filled < 2:
@@ -1745,7 +1909,11 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
         # Try submitting
         clicked = await _click_submit(page)
         if clicked:
-            await asyncio.sleep(1.5)
+            # Wait for SPA transitions or page loads after submit
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=5_000)
+            except PlaywrightTimeout:
+                await asyncio.sleep(2.0)
             # Check if we landed on a success page
             if await _detect_success(page):
                 return {"status": "entered", "steps": step + 1}
@@ -1756,10 +1924,17 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
                 submitted = True
                 break
         else:
-            # No submit found — try next step button
+            # No submit found — try next/continue step button
             next_clicked = await _try_next_step(page)
             if not next_clicked:
-                break
+                if fields_filled == 0:
+                    # No fields, no nav buttons — try clicking through interstitials
+                    clicked_through = await _try_click_through(page)
+                    if not clicked_through:
+                        break
+                    # Clicked something; loop again to check new page
+                else:
+                    break
 
     if total_fields_filled == 0 and not submitted:
         return {"status": "no_form"}
