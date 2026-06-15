@@ -114,8 +114,9 @@ async def _enter_worker(
                 except Exception:
                     pass
 
-        if config.delay_between_entries > 0:
-            await asyncio.sleep(config.delay_between_entries)
+    # Sleep OUTSIDE the semaphore so other workers can claim the slot immediately
+    if config.delay_between_entries > 0:
+        await asyncio.sleep(config.delay_between_entries)
 
 
 async def _run_enter_async(config: Config, db: Database) -> None:

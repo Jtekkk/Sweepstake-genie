@@ -531,7 +531,7 @@ class SweepstakeGenieApp(ctk.CTk):
             except Exception as exc:
                 self._log_queue.put(f"[{_ts()}] ERROR: {exc}")
             finally:
-                self._log_queue.put(("done", "Discovering" if not self._stop_flag.is_set() else "Stopped"))
+                self._log_queue.put(("done", "Stopped" if self._stop_flag.is_set() else "Done"))
 
         self._running_thread = _run_in_thread(task)
 
@@ -1087,13 +1087,6 @@ class SweepstakeGenieApp(ctk.CTk):
         self._captcha_count_lbl.configure(
             text=f"{count} CAPTCHA-blocked {'entry' if count == 1 else 'entries'}"
         )
-        # Also update the stats badge on the tab label if count > 0
-        tab_text = f"CAPTCHA Queue ({count})" if count else "CAPTCHA Queue"
-        # CTkTabview doesn't support renaming, so just update the label widget
-        try:
-            self._tabview.set("CAPTCHA Queue")
-        except Exception:
-            pass
 
     def _captcha_get_selected_url(self) -> str | None:
         sel = self._captcha_tree.selection()
@@ -1104,14 +1097,9 @@ class SweepstakeGenieApp(ctk.CTk):
 
     def _captcha_next_url(self, current_url: str) -> str | None:
         """Return the URL of the item immediately after current_url in the tree."""
-        children = self._captcha_tree.get_children()
-        try:
-            idx = list(children).index(current_url)
-            if idx + 1 < len(children):
-                return children[idx + 1]
-        except ValueError:
-            pass
-        return None
+        # tree.next() is order-aware and handles sorting correctly
+        nxt = self._captcha_tree.next(current_url)
+        return nxt if nxt else None
 
     def _captcha_start_solving(self) -> None:
         """Open the first queued CAPTCHA in the browser and select its row."""

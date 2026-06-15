@@ -11,6 +11,7 @@ Returns a result dict with a 'status' key:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 from typing import Any
@@ -409,24 +410,25 @@ async def _detect_captcha(page: Page) -> tuple[str | None, str | None]:
 
 async def _inject_captcha_token(page: Page, captcha_type: str, token: str) -> None:
     """Inject a solved CAPTCHA token into the page and trigger callbacks."""
-    # Escape token for JS string (tokens are alphanumeric so minimal risk)
-    safe_token = token.replace("'", "\\'").replace("\n", "")
+    # json.dumps produces a fully-escaped JS string literal (handles backslashes,
+    # quotes, control chars) — safe for direct interpolation into JS source.
+    js_token = json.dumps(token)
 
     if captcha_type == "recaptcha":
         await page.evaluate(f"""
             (function() {{
-                // Set the response textarea
+                var t = {js_token};
                 var resp = document.getElementById('g-recaptcha-response');
-                if (resp) resp.innerHTML = '{safe_token}';
+                if (resp) resp.innerHTML = t;
                 document.querySelectorAll('.g-recaptcha-response').forEach(
-                    function(el) {{ el.innerHTML = '{safe_token}'; }}
+                    function(el) {{ el.innerHTML = t; }}
                 );
                 // Fire the grecaptcha callback if registered
                 try {{
                     var cfg = window.___grecaptcha_cfg;
                     if (cfg && cfg.clients) {{
                         Object.values(cfg.clients).forEach(function(c) {{
-                            if (c && c.callback) c.callback('{safe_token}');
+                            if (c && c.callback) c.callback(t);
                         }});
                     }}
                 }} catch(e) {{}}
@@ -435,16 +437,17 @@ async def _inject_captcha_token(page: Page, captcha_type: str, token: str) -> No
     elif captcha_type == "hcaptcha":
         await page.evaluate(f"""
             (function() {{
+                var t = {js_token};
                 var sel = 'textarea[name="h-captcha-response"], ' +
                           'textarea[name="g-recaptcha-response"]';
                 document.querySelectorAll(sel).forEach(
-                    function(el) {{ el.value = '{safe_token}'; }}
+                    function(el) {{ el.value = t; }}
                 );
                 // Fire hcaptcha callback
                 try {{
                     if (window.hcaptcha) {{
                         Object.values(window.hcaptcha._state || {{}}).forEach(function(s) {{
-                            if (s && s.response && s.onSuccess) s.onSuccess('{safe_token}');
+                            if (s && s.response && s.onSuccess) s.onSuccess(t);
                         }});
                     }}
                 }} catch(e) {{}}
@@ -471,8 +474,6 @@ async def _solve_recaptcha_audio(page: Page) -> bool:
     except ImportError:
         logger.debug("pydub not installed; skipping audio CAPTCHA")
         return False
-
-    import requests as _req
 
     try:
         # Locate the anchor frame (checkbox widget)
@@ -532,11 +533,10 @@ async def _solve_recaptcha_audio(page: Page) -> bool:
             logger.debug("Audio CAPTCHA: audio URL not found in iframe")
             return False
 
-        # Download the MP3
+        # Download the MP3 via Playwright's async HTTP client (non-blocking)
         try:
-            resp = _req.get(audio_url, timeout=30)
-            resp.raise_for_status()
-            mp3_bytes = resp.content
+            api_response = await page.request.get(audio_url)
+            mp3_bytes = await api_response.body()
         except Exception as exc:
             logger.debug("Audio CAPTCHA: download failed: %s", exc)
             return False
@@ -1694,11 +1694,11 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
                 captcha_type, captcha_solver.service, (sitekey or "")[:8],
             )
             if captcha_type == "hcaptcha":
-                token = await asyncio.get_event_loop().run_in_executor(
+                token = await asyncio.get_running_loop().run_in_executor(
                     None, captcha_solver.solve_hcaptcha, sitekey, page.url
                 )
             else:
-                token = await asyncio.get_event_loop().run_in_executor(
+                token = await asyncio.get_running_loop().run_in_executor(
                     None, captcha_solver.solve_recaptcha, sitekey, page.url
                 )
             if token:
@@ -1761,7 +1761,7 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
             if not next_clicked:
                 break
 
-    if total_fields_filled == 0:
+    if total_fields_filled == 0 and not submitted:
         return {"status": "no_form"}
 
     if not submitted:

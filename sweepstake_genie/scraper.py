@@ -38,9 +38,10 @@ def _normalize_url(url: str) -> str:
         params = parse_qs(p.query, keep_blank_values=False)
         filtered = {k: v for k, v in params.items() if k.lower() not in _TRACKING_PARAMS}
         clean_query = urlencode(filtered, doseq=True)
+        _netloc = p.netloc.lower()
         normalized = p._replace(
             scheme=p.scheme.lower(),
-            netloc=p.netloc.lower().replace("www.", "", 1),
+            netloc=_netloc[4:] if _netloc.startswith("www.") else _netloc,
             path=p.path.rstrip("/") or "/",
             query=clean_query,
             fragment="",
@@ -798,6 +799,7 @@ def _scrape_pages(
     for path in page_paths:
         page_url = path if path.startswith("http") else base_url + path
         soup = _get(page_url, session)
+        time.sleep(_DELAY)  # rate-limit regardless of success/failure
         if soup is None:
             continue
         found = _extract_external_links(
@@ -806,7 +808,6 @@ def _scrape_pages(
             container_selector=container_selector,
         )
         results.extend(found)
-        time.sleep(_DELAY)
 
     logger.info("%s: %d sweepstakes", source, len(results))
     return results
@@ -860,6 +861,11 @@ def _scrape_reddit_subs(subreddits: list[str]) -> list[dict[str, Any]]:
             api_url = f"https://www.reddit.com/r/{sub}/{sort}.json?limit=100"
             try:
                 resp = session.get(api_url, headers=headers, timeout=_TIMEOUT)
+                if resp.status_code == 429:
+                    wait = int(resp.headers.get("Retry-After", 60))
+                    logger.warning("Reddit rate-limited; sleeping %ds", wait)
+                    time.sleep(wait)
+                    continue
                 resp.raise_for_status()
                 data = resp.json()
             except Exception as exc:

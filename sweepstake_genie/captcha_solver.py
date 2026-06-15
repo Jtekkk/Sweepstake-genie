@@ -169,8 +169,8 @@ class CaptchaSolver:
                 )
                 data = r.json()
                 if "balance" in data:
-                    # balance is in US cents
-                    return float(data["balance"]) / 100
+                    # balance is in credits; 1000 credits ≈ $1
+                    return float(data["balance"]) / 1000
             elif self.service == "nocaptchaai":
                 r = self._session.get(
                     "https://api.nocaptchaai.com/balance",
@@ -190,14 +190,14 @@ class CaptchaSolver:
                 if "balance" in data:
                     return float(data["balance"])
             elif self.service == "nopecha":
-                r = self._session.post(
-                    "https://api.nopecha.com/",
-                    json={"key": self.api_key, "type": "credits"},
+                r = self._session.get(
+                    "https://api.nopecha.com/status",
+                    params={"key": self.api_key},
                     timeout=15,
                 )
                 data = r.json()
                 if data.get("error") == 0:
-                    return float(data.get("data", 0))
+                    return float(data.get("data", {}).get("credit", 0))
         except Exception as exc:
             logger.warning("Balance check failed: %s", exc)
         return None

@@ -10,8 +10,11 @@ Usage::
 
 from __future__ import annotations
 
+import logging
 import sys
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 from playwright.async_api import (
     Browser,
@@ -29,23 +32,23 @@ if TYPE_CHECKING:
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
+    "Chrome/126.0.0.0 Safari/537.36"
 )
 
 _VIEWPORT = {"width": 1280, "height": 720}
 
 _LOCALE = "en-US"
 
-# Extra HTTP headers that make requests look like a real browser
+# Extra HTTP headers that make requests look like a real browser.
+# Note: Sec-Ch-Ua / Sec-Ch-Ua-Mobile / Sec-Ch-Ua-Platform are intentionally
+# omitted — Playwright sets those from the actual Chromium binary version,
+# and overriding them with a static string would create a detectable mismatch.
 _EXTRA_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
     "Accept": (
         "text/html,application/xhtml+xml,application/xml;q=0.9,"
         "image/avif,image/webp,image/apng,*/*;q=0.8"
     ),
-    "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
 }
 
 
@@ -75,10 +78,6 @@ class BrowserManager:
             "--disable-blink-features=AutomationControlled",
             "--disable-dev-shm-usage",
             "--disable-gpu",
-            "--disable-features=IsolateOrigins,site-per-process",
-            "--disable-site-isolation-trials",
-            "--disable-web-security",
-            "--allow-running-insecure-content",
             "--disable-extensions",
             "--mute-audio",
         ]
@@ -117,8 +116,8 @@ class BrowserManager:
             if obj is not None:
                 try:
                     await getattr(obj, method)()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Cleanup error (%s.%s): %s", type(obj).__name__, method, exc)
 
     # ── Public API ────────────────────────────────────────────────────────
 

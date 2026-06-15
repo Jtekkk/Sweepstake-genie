@@ -76,7 +76,7 @@ class Database:
             ]:
                 try:
                     conn.execute(col_def)
-                except Exception:
+                except sqlite3.OperationalError:
                     pass  # column already exists
 
     @staticmethod
@@ -116,10 +116,10 @@ class Database:
         with self._conn() as conn:
             conn.execute(
                 """UPDATE sweepstakes
-                   SET status='entered', entered_at=CURRENT_TIMESTAMP,
+                   SET status='entered', entered_at=?,
                        entry_count=entry_count+1
                  WHERE url=?""",
-                (url,),
+                (self._now(), url),
             )
 
     def mark_skipped(self, url: str, reason: str = "") -> None:
@@ -162,7 +162,7 @@ class Database:
                     WHERE allows_daily=1
                       AND status='entered'
                       AND (entered_at IS NULL
-                           OR DATE(entered_at) < DATE('now', 'localtime'))
+                           OR DATE(entered_at) < DATE('now'))
                     ORDER BY id""",
             )
             return [dict(r) for r in cur.fetchall()]

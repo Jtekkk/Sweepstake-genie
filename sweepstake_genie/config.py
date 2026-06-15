@@ -4,11 +4,14 @@ Configuration loader: reads profile.yaml and merges with defaults.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 # ── Defaults ────────────────────────────────────────────────────────────────
@@ -59,6 +62,9 @@ class Config:
         self.profile = {k: str(v) for k, v in raw_profile.items()}
 
         raw_settings = self._data.get("settings", {})
+        unknown = set(raw_settings) - set(DEFAULT_SETTINGS)
+        if unknown:
+            logger.warning("Unknown settings keys (possible typos): %s", ", ".join(sorted(unknown)))
         self.settings.update(raw_settings)
 
     # ── Convenience properties ────────────────────────────────────────────
@@ -68,8 +74,8 @@ class Config:
         return bool(self.settings.get("headless", True))
 
     @property
-    def delay_between_entries(self) -> int | float:
-        return self.settings.get("delay_between_entries", 3)
+    def delay_between_entries(self) -> float:
+        return float(self.settings.get("delay_between_entries", 3))
 
     @property
     def max_entries_per_run(self) -> int:
