@@ -1518,7 +1518,7 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
                 el = await page.query_selector(sel)
                 if el and await el.is_visible():
                     href = await el.get_attribute("href") or ""
-                    if href and not href.startswith("#"):
+                    if href and href.startswith(("http://", "https://")):
                         await el.click()
                         try:
                             await page.wait_for_load_state("domcontentloaded", timeout=12_000)
