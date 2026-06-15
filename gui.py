@@ -1239,7 +1239,13 @@ class SweepstakeGenieApp(ctk.CTk):
             row=row, column=0, sticky="e", padx=(10, 4), pady=8
         )
         self._captcha_service_var = ctk.CTkComboBox(
-            parent, values=["none", "2captcha", "capsolver"], width=200
+            parent,
+            values=[
+                "none", "2captcha", "capsolver", "anticaptcha", "capmonster",
+                "deathbycaptcha", "azcaptcha", "ezcaptcha", "nextcaptcha",
+                "nocaptchaai", "metabypass", "nopecha", "yescaptcha",
+            ],
+            width=200,
         )
         self._captcha_service_var.set("none")
         self._captcha_service_var.grid(row=row, column=1, sticky="w", padx=(0, 10), pady=8)
