@@ -985,8 +985,8 @@ class SweepstakeGenieApp(ctk.CTk):
             parent,
             text=(
                 "Sweepstakes blocked by a CAPTCHA are listed below.\n"
-                "Open each URL in your browser, solve the CAPTCHA manually, "
-                "then mark it Entered or click Retry to re-queue it for automation."
+                "Click 'Start Solving' to open the first one. After you solve each CAPTCHA "
+                "and click 'Mark as Entered' or 'Retry', the next one opens automatically."
             ),
             text_color="#aaaaaa",
             wraplength=800,
@@ -1000,6 +1000,12 @@ class SweepstakeGenieApp(ctk.CTk):
         ctk.CTkButton(
             btn_frame, text="Refresh", width=90,
             command=self._refresh_captcha_queue,
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            btn_frame, text="Start Solving", width=130,
+            fg_color="#1a5fa8", hover_color="#2272c3",
+            command=self._captcha_start_solving,
         ).pack(side="left", padx=(0, 6))
 
         ctk.CTkButton(
@@ -1052,13 +1058,13 @@ class SweepstakeGenieApp(ctk.CTk):
         ).pack(side="left", padx=(0, 8))
 
         ctk.CTkButton(
-            action_frame, text="Mark Selected as Entered", width=200,
+            action_frame, text="Mark as Entered  →", width=200,
             fg_color="#1a7a1a", hover_color="#228b22",
             command=self._captcha_mark_entered,
         ).pack(side="left", padx=(0, 8))
 
         ctk.CTkButton(
-            action_frame, text="Retry Selected", width=140,
+            action_frame, text="Retry  →", width=140,
             fg_color="#555555", hover_color="#666666",
             command=self._captcha_retry_selected,
         ).pack(side="left")
@@ -1096,6 +1102,29 @@ class SweepstakeGenieApp(ctk.CTk):
             return None
         return sel[0]  # iid is the url
 
+    def _captcha_next_url(self, current_url: str) -> str | None:
+        """Return the URL of the item immediately after current_url in the tree."""
+        children = self._captcha_tree.get_children()
+        try:
+            idx = list(children).index(current_url)
+            if idx + 1 < len(children):
+                return children[idx + 1]
+        except ValueError:
+            pass
+        return None
+
+    def _captcha_start_solving(self) -> None:
+        """Open the first queued CAPTCHA in the browser and select its row."""
+        import webbrowser
+        children = self._captcha_tree.get_children()
+        if not children:
+            messagebox.showinfo("Empty Queue", "No CAPTCHA-blocked entries.", parent=self)
+            return
+        first_url = children[0]
+        self._captcha_tree.selection_set(first_url)
+        self._captcha_tree.see(first_url)
+        webbrowser.open(first_url)
+
     def _captcha_open_selected(self) -> None:
         url = self._captcha_get_selected_url()
         if url:
@@ -1104,15 +1133,29 @@ class SweepstakeGenieApp(ctk.CTk):
 
     def _captcha_mark_entered(self) -> None:
         url = self._captcha_get_selected_url()
-        if url:
-            _mark_captcha_entered(self._db_path, url)
-            self._refresh_captcha_queue()
+        if not url:
+            return
+        next_url = self._captcha_next_url(url)
+        _mark_captcha_entered(self._db_path, url)
+        self._refresh_captcha_queue()
+        if next_url:
+            import webbrowser
+            self._captcha_tree.selection_set(next_url)
+            self._captcha_tree.see(next_url)
+            webbrowser.open(next_url)
 
     def _captcha_retry_selected(self) -> None:
         url = self._captcha_get_selected_url()
-        if url:
-            _reset_captcha_to_pending(self._db_path, url)
-            self._refresh_captcha_queue()
+        if not url:
+            return
+        next_url = self._captcha_next_url(url)
+        _reset_captcha_to_pending(self._db_path, url)
+        self._refresh_captcha_queue()
+        if next_url:
+            import webbrowser
+            self._captcha_tree.selection_set(next_url)
+            self._captcha_tree.see(next_url)
+            webbrowser.open(next_url)
 
     def _captcha_open_all(self) -> None:
         import webbrowser
