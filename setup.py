@@ -15,6 +15,8 @@ setup(
         "pyyaml>=6.0",
         "rich>=13.0.0",
         "click>=8.1.0",
+        "SpeechRecognition>=3.10.0",
+        "pydub>=0.25.1",
     ],
     entry_points={
         "console_scripts": [

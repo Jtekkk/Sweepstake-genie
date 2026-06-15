@@ -8,3 +8,5 @@ rich>=13.0.0
 click>=8.1.0
 customtkinter>=5.2.0
 pyinstaller>=6.0.0
+SpeechRecognition>=3.10.0
+pydub>=0.25.1

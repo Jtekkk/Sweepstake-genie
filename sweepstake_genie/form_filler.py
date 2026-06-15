@@ -454,6 +454,145 @@ async def _inject_captcha_token(page: Page, captcha_type: str, token: str) -> No
     await asyncio.sleep(0.5)
 
 
+async def _solve_recaptcha_audio(page: Page) -> bool:
+    """Solve reCAPTCHA v2 via the audio challenge + Google Speech-to-Text (free).
+
+    Requires: SpeechRecognition and pydub (+ ffmpeg) installed.
+    Returns True if the CAPTCHA was solved directly in the browser.
+    """
+    try:
+        import io
+        import speech_recognition as sr
+    except ImportError:
+        logger.debug("speech_recognition not installed; skipping audio CAPTCHA")
+        return False
+    try:
+        from pydub import AudioSegment
+    except ImportError:
+        logger.debug("pydub not installed; skipping audio CAPTCHA")
+        return False
+
+    import requests as _req
+
+    try:
+        # Locate the anchor frame (checkbox widget)
+        anchor_frame = None
+        for frame in page.frames:
+            if "recaptcha" in frame.url and "anchor" in frame.url:
+                anchor_frame = frame
+                break
+        if not anchor_frame:
+            return False
+
+        checkbox = await anchor_frame.query_selector("#recaptcha-anchor")
+        if not checkbox:
+            return False
+        await checkbox.click()
+        await asyncio.sleep(1.5)
+
+        # Check if the easy-pass already ticked it
+        passed = await anchor_frame.evaluate(
+            "() => document.querySelector('#recaptcha-anchor')?.getAttribute('aria-checked') === 'true'"
+        )
+        if passed:
+            logger.info("reCAPTCHA passed without challenge (easy-pass)")
+            return True
+
+        # Wait for the challenge iframe (bframe)
+        bframe = None
+        for _ in range(12):
+            for frame in page.frames:
+                if "recaptcha" in frame.url and "bframe" in frame.url:
+                    bframe = frame
+                    break
+            if bframe:
+                break
+            await asyncio.sleep(0.5)
+        if not bframe:
+            return False
+
+        # Click the audio button
+        audio_btn = await bframe.query_selector("#recaptcha-audio-button")
+        if not audio_btn or not await audio_btn.is_visible():
+            return False
+        await audio_btn.click()
+        await asyncio.sleep(1.5)
+
+        # Grab the audio source URL from within the challenge iframe
+        audio_url = await bframe.evaluate("""
+            () => {
+                const src = document.querySelector('#audio-source');
+                if (src && src.src) return src.src;
+                const link = document.querySelector('.rc-audiochallenge-tdownload-link a');
+                if (link) return link.href;
+                return null;
+            }
+        """)
+        if not audio_url:
+            logger.debug("Audio CAPTCHA: audio URL not found in iframe")
+            return False
+
+        # Download the MP3
+        try:
+            resp = _req.get(audio_url, timeout=30)
+            resp.raise_for_status()
+            mp3_bytes = resp.content
+        except Exception as exc:
+            logger.debug("Audio CAPTCHA: download failed: %s", exc)
+            return False
+
+        # Convert MP3 → WAV in memory
+        try:
+            segment = AudioSegment.from_mp3(io.BytesIO(mp3_bytes))
+            wav_buf = io.BytesIO()
+            segment.export(wav_buf, format="wav")
+            wav_buf.seek(0)
+        except Exception as exc:
+            logger.debug("Audio CAPTCHA: MP3→WAV conversion failed: %s", exc)
+            return False
+
+        # Transcribe with Google's free Speech-to-Text
+        try:
+            recognizer = sr.Recognizer()
+            with sr.AudioFile(wav_buf) as source:
+                audio_data = recognizer.record(source)
+            transcript = recognizer.recognize_google(audio_data).strip().lower()
+        except Exception as exc:
+            logger.debug("Audio CAPTCHA: transcription failed: %s", exc)
+            return False
+
+        if not transcript:
+            return False
+        logger.info("Audio CAPTCHA transcript: %r", transcript)
+
+        # Type the answer and submit
+        response_input = await bframe.query_selector("#audio-response")
+        if not response_input:
+            return False
+        await response_input.fill(transcript)
+        await asyncio.sleep(0.3)
+
+        verify_btn = await bframe.query_selector("#recaptcha-verify-button")
+        if verify_btn:
+            await verify_btn.click()
+            await asyncio.sleep(2)
+
+        # Confirm the checkbox is now ticked
+        solved = await anchor_frame.evaluate(
+            "() => document.querySelector('#recaptcha-anchor')?.getAttribute('aria-checked') === 'true'"
+        )
+        if solved:
+            logger.info("Audio CAPTCHA solved successfully")
+            return True
+
+        logger.debug("Audio CAPTCHA: verify did not tick checkbox")
+        return False
+
+    except Exception as exc:
+        logger.debug("Audio CAPTCHA exception: %s", exc)
+        return False
+
+
 async def _bypass_age_gate(page: Page, profile: dict) -> bool:
     """Try to click through age verification gate. Returns True if one was found."""
     # First try clicking a button directly
@@ -1542,8 +1681,18 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
     # ── CAPTCHA detection & solving ───────────────────────────────────────────
     captcha_type, sitekey = await _detect_captcha(page)
     if captcha_type:
-        if captcha_solver and captcha_solver.enabled and sitekey:
-            logger.info("Attempting to solve %s (sitekey: %s…)", captcha_type, (sitekey or "")[:8])
+        solved = False
+
+        # Always try the free audio challenge first for reCAPTCHA
+        if captcha_type == "recaptcha":
+            solved = await _solve_recaptcha_audio(page)
+
+        # Fall back to configured external service if audio didn't work
+        if not solved and captcha_solver and captcha_solver.enabled and sitekey:
+            logger.info(
+                "Solving %s via %s (sitekey: %s…)",
+                captcha_type, captcha_solver.service, (sitekey or "")[:8],
+            )
             if captcha_type == "hcaptcha":
                 token = await asyncio.get_event_loop().run_in_executor(
                     None, captcha_solver.solve_hcaptcha, sitekey, page.url
@@ -1554,10 +1703,11 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
                 )
             if token:
                 await _inject_captcha_token(page, captcha_type, token)
-                # Don't return — continue to fill and submit
+                solved = True
             else:
                 return {"status": "captcha", "detail": "solver returned no token"}
-        else:
+
+        if not solved:
             return {"status": "captcha"}
 
     # ── Multi-step form loop (max 4 steps) ────────────────────────────────────
