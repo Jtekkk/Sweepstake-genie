@@ -10,3 +10,8 @@ customtkinter>=5.2.0
 pyinstaller>=6.0.0
 SpeechRecognition>=3.10.0
 pydub>=0.25.1
+# Note: pydub also requires the ffmpeg CLI binary (not a Python package).
+# Install it separately:
+#   Linux:  sudo apt install ffmpeg
+#   Mac:    brew install ffmpeg
+#   Windows: download from https://ffmpeg.org/download.html and add to PATH

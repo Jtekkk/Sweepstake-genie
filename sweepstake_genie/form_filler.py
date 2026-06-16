@@ -510,12 +510,14 @@ async def _solve_recaptcha_audio(page: Page) -> bool:
         import io
         import speech_recognition as sr
     except ImportError:
-        logger.debug("speech_recognition not installed; skipping audio CAPTCHA")
+        logger.warning("SpeechRecognition not installed — audio CAPTCHA disabled. "
+                       "Run: pip install SpeechRecognition pydub  and install ffmpeg.")
         return False
     try:
         from pydub import AudioSegment
     except ImportError:
-        logger.debug("pydub not installed; skipping audio CAPTCHA")
+        logger.warning("pydub not installed — audio CAPTCHA disabled. "
+                       "Run: pip install pydub  and install ffmpeg.")
         return False
 
     try:
@@ -526,10 +528,12 @@ async def _solve_recaptcha_audio(page: Page) -> bool:
                 anchor_frame = frame
                 break
         if not anchor_frame:
+            logger.debug("Audio CAPTCHA: no anchor frame found (may be reCAPTCHA v3/invisible)")
             return False
 
         checkbox = await anchor_frame.query_selector("#recaptcha-anchor")
         if not checkbox:
+            logger.debug("Audio CAPTCHA: #recaptcha-anchor not found in anchor frame")
             return False
         await checkbox.click()
         await asyncio.sleep(1.5)
@@ -553,11 +557,13 @@ async def _solve_recaptcha_audio(page: Page) -> bool:
                 break
             await asyncio.sleep(0.5)
         if not bframe:
+            logger.warning("Audio CAPTCHA: challenge iframe (bframe) not found")
             return False
 
         # Click the audio button
         audio_btn = await bframe.query_selector("#recaptcha-audio-button")
         if not audio_btn or not await audio_btn.is_visible():
+            logger.warning("Audio CAPTCHA: audio button not visible (image challenge may be shown)")
             return False
         await audio_btn.click()
         await asyncio.sleep(1.5)
@@ -573,7 +579,7 @@ async def _solve_recaptcha_audio(page: Page) -> bool:
             }
         """)
         if not audio_url:
-            logger.debug("Audio CAPTCHA: audio URL not found in iframe")
+            logger.warning("Audio CAPTCHA: audio URL not found in challenge iframe")
             return False
 
         # Download the MP3 via Playwright's async HTTP client (non-blocking)
@@ -581,7 +587,7 @@ async def _solve_recaptcha_audio(page: Page) -> bool:
             api_response = await page.request.get(audio_url)
             mp3_bytes = await api_response.body()
         except Exception as exc:
-            logger.debug("Audio CAPTCHA: download failed: %s", exc)
+            logger.warning("Audio CAPTCHA: download failed: %s", exc)
             return False
 
         # Convert MP3 → WAV in memory
@@ -591,7 +597,7 @@ async def _solve_recaptcha_audio(page: Page) -> bool:
             segment.export(wav_buf, format="wav")
             wav_buf.seek(0)
         except Exception as exc:
-            logger.debug("Audio CAPTCHA: MP3→WAV conversion failed: %s", exc)
+            logger.warning("Audio CAPTCHA: MP3→WAV conversion failed: %s", exc)
             return False
 
         # Transcribe with Google's free Speech-to-Text
@@ -601,7 +607,7 @@ async def _solve_recaptcha_audio(page: Page) -> bool:
                 audio_data = recognizer.record(source)
             transcript = recognizer.recognize_google(audio_data).strip().lower()
         except Exception as exc:
-            logger.debug("Audio CAPTCHA: transcription failed: %s", exc)
+            logger.warning("Audio CAPTCHA: transcription failed: %s", exc)
             return False
 
         if not transcript:
@@ -628,11 +634,11 @@ async def _solve_recaptcha_audio(page: Page) -> bool:
             logger.info("Audio CAPTCHA solved successfully")
             return True
 
-        logger.debug("Audio CAPTCHA: verify did not tick checkbox")
+        logger.warning("Audio CAPTCHA: verify clicked but checkbox not ticked (wrong transcript or rate-limited)")
         return False
 
     except Exception as exc:
-        logger.debug("Audio CAPTCHA exception: %s", exc)
+        logger.warning("Audio CAPTCHA exception: %s", exc)
         return False
 
 
