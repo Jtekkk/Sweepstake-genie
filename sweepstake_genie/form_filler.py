@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 from typing import Any
 from urllib.parse import urlparse, urljoin
 
@@ -182,6 +183,9 @@ _SUBMIT_SELECTORS = [
     "button:has-text('Enter Now')",
     "button:has-text('Enter Sweepstakes')",
     "button:has-text('Enter to Win')",
+    "button:has-text('Enter the Sweepstakes')",
+    "button:has-text('Enter Giveaway')",
+    "button:has-text('Enter the Contest')",
     "input[value*='Enter' i]",
     "input[value*='Submit' i]",
     "button:has-text('Sign Up')",
@@ -192,10 +196,33 @@ _SUBMIT_SELECTORS = [
     "button:has-text('Confirm')",
     "button:has-text('Get Started')",
     "button:has-text('Claim')",
+    "button:has-text('Claim Prize')",
+    "button:has-text('Claim Your Prize')",
     "button:has-text('Yes, Enter Me')",
+    "button:has-text('Count Me In')",
+    "button:has-text('I\\'m In')",
+    "button:has-text('Take Part')",
+    "button:has-text('Participate')",
+    "button:has-text('Complete Entry')",
+    "button:has-text('Complete My Entry')",
+    "button:has-text('Finish')",
+    "button:has-text('Done')",
+    "button:has-text('Send')",
+    "button:has-text('Send Entry')",
+    "button:has-text('Apply')",
+    "button:has-text('Try My Luck')",
+    "button:has-text('Spin')",
+    "button:has-text('Play')",
+    "button:has-text('Play Now')",
+    "button:has-text('Reveal')",
+    "button:has-text('Unlock')",
+    "button:has-text('Access')",
     "input[value*='Sign Up' i]",
     "input[value*='Register' i]",
     "input[value*='Join' i]",
+    "input[value*='Claim' i]",
+    "input[value*='Participate' i]",
+    "input[value*='Complete' i]",
 ]
 
 # Terms/consent checkboxes
@@ -1582,29 +1609,160 @@ async def _fill_field(page: Page, selectors: list[str], value: str, is_select: b
     return False
 
 
+# US state abbreviation ↔ full-name lookup for smart state field filling
+_US_STATES_ABBREV_TO_NAME: dict[str, str] = {
+    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
+    "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
+    "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho",
+    "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas",
+    "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+    "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi",
+    "MO": "Missouri", "MT": "Montana", "NE": "Nebraska", "NV": "Nevada",
+    "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
+    "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma",
+    "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+    "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
+    "VT": "Vermont", "VA": "Virginia", "WA": "Washington", "WV": "West Virginia",
+    "WI": "Wisconsin", "WY": "Wyoming", "DC": "District of Columbia",
+}
+_US_STATES_NAME_TO_ABBREV: dict[str, str] = {v: k for k, v in _US_STATES_ABBREV_TO_NAME.items()}
+
+
 async def _fill_state(page: Page, state_value: str) -> None:
-    """Fill state field — handles both <select> and <input>."""
+    """Fill state field — handles <select> and <input>, tries both abbrev and full name."""
+    sv_upper = state_value.strip().upper()
+    sv_title = state_value.strip().title()
+
+    # Build ordered list of values to try: original, then alternate form
+    candidates: list[str] = [state_value]
+    if sv_upper in _US_STATES_ABBREV_TO_NAME:
+        candidates.append(_US_STATES_ABBREV_TO_NAME[sv_upper])   # CA → California
+    elif sv_title in _US_STATES_NAME_TO_ABBREV:
+        candidates.append(_US_STATES_NAME_TO_ABBREV[sv_title])   # California → CA
+
     for sel in _STATE_SELECTORS:
         try:
             el = await page.query_selector(sel)
-            if el is None:
-                continue
-            visible = await el.is_visible()
-            if not visible:
+            if el is None or not await el.is_visible():
                 continue
             tag = await page.eval_on_selector(sel, "el => el.tagName.toLowerCase()")
             if tag == "select":
-                # Try value first, then label
-                try:
-                    await page.select_option(sel, value=state_value)
-                except Exception:
-                    await page.select_option(sel, label=state_value)
+                filled = False
+                for v in candidates:
+                    for method in ("value", "label"):
+                        try:
+                            if method == "value":
+                                await page.select_option(sel, value=v)
+                            else:
+                                await page.select_option(sel, label=v)
+                            filled = True
+                            break
+                        except Exception:
+                            pass
+                    if filled:
+                        break
+                if not filled:
+                    continue
             else:
                 await page.fill(sel, state_value)
             await _human_delay()
             return
         except Exception as exc:
             logger.debug("fill_state selector=%s error=%s", sel, exc)
+
+
+async def _fill_phone_smart(page: Page, phone: str) -> bool:
+    """
+    Fill phone fields using the format the input expects (detected from placeholder).
+    Tries XXX-XXX-XXXX, (XXX) XXX-XXXX, XXX.XXX.XXXX, and raw digits.
+    Returns True if a field was filled.
+    """
+    if not phone:
+        return False
+    digits = re.sub(r"\D", "", phone)
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    if len(digits) != 10:
+        return False
+
+    d = digits
+    _PHONE_SELECTORS = [
+        "input[type='tel']",
+        "input[name*='phone' i]",
+        "input[id*='phone' i]",
+        "input[placeholder*='phone' i]",
+        "input[autocomplete='tel']",
+        "input[name*='mobile' i]",
+        "input[name*='cell' i]",
+    ]
+    for sel in _PHONE_SELECTORS:
+        try:
+            el = await page.query_selector(sel)
+            if el is None or not await el.is_visible() or not await el.is_enabled():
+                continue
+            placeholder = (await el.get_attribute("placeholder") or "").lower()
+            # Detect expected format from placeholder
+            if re.search(r"\(\s*[x0]\{3\}\s*\)", placeholder) or re.search(r"\(\d{3}\)", placeholder):
+                value = f"({d[:3]}) {d[3:6]}-{d[6:]}"
+            elif "." in placeholder and placeholder.count(".") >= 2:
+                value = f"{d[:3]}.{d[3:6]}.{d[6:]}"
+            elif re.search(r"x{3}[\s-]x{3}[\s-]x{4}", placeholder) or re.search(r"0{3}[\s-]0{3}", placeholder):
+                value = f"{d[:3]}-{d[3:6]}-{d[6:]}"
+            else:
+                value = f"{d[:3]}-{d[3:6]}-{d[6:]}"  # default: XXX-XXX-XXXX
+            current = await el.input_value()
+            if current:
+                continue
+            await el.triple_click()
+            await el.fill(value)
+            await _human_delay()
+            return True
+        except Exception as exc:
+            logger.debug("fill_phone_smart sel=%s error=%s", sel, exc)
+    return False
+
+
+async def _dismiss_popup_overlays(page: Page) -> None:
+    """
+    Dismiss newsletter subscribe popups, exit-intent overlays, and generic
+    modals that can block access to the actual entry form.
+    """
+    _OVERLAY_CLOSE_SELECTORS = [
+        # Generic modal close / dismiss buttons
+        "button[aria-label*='close' i]", "button[aria-label*='dismiss' i]",
+        "button[class*='close' i]:not([class*='cookie'])",
+        "[class*='modal'] button[class*='close' i]",
+        "[class*='popup'] button[class*='close' i]",
+        "[id*='modal'] button[class*='close' i]",
+        ".modal-close", ".popup-close", ".dialog-close",
+        "[data-dismiss='modal']", "[data-close]",
+        # "No thanks" / skip patterns
+        "button:has-text('No thanks')", "button:has-text('No Thanks')",
+        "button:has-text('No, thanks')", "button:has-text('Skip')",
+        "button:has-text('Maybe Later')", "button:has-text('Not Now')",
+        "button:has-text('Close')", "button:has-text('Dismiss')",
+        "a:has-text('No thanks')", "a:has-text('Skip')",
+        "a:has-text('Maybe Later')", "a:has-text('Not Now')",
+        # SVG / icon close buttons common in overlays
+        "button svg[class*='close']", ".overlay button",
+        ".newsletter-popup button", ".email-popup button",
+        ".subscribe-popup button", ".opt-in button",
+        # Specific well-known popup tools
+        "#privy-popup-content button[data-behavior='close']",  # Privy
+        ".pum-close",  # Popup Maker
+        ".fancybox-close-small", ".mfp-close",  # Magnific / Fancybox
+        ".klaviyo-close-form",  # Klaviyo
+        "#attentive_creative button[aria-label*='close' i]",  # Attentive SMS
+    ]
+    for sel in _OVERLAY_CLOSE_SELECTORS:
+        try:
+            el = await page.query_selector(sel)
+            if el and await el.is_visible():
+                await el.click()
+                await asyncio.sleep(0.5)
+                return
+        except Exception:
+            pass
 
 
 async def _check_terms(page: Page) -> None:
@@ -1817,8 +1975,9 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
     except PlaywrightTimeout:
         return {"status": "error", "message": "Page load timeout"}
 
-    # ── Dismiss GDPR / cookie-consent banners first ───────────────────────────
+    # ── Dismiss GDPR / cookie-consent banners and popup overlays ─────────────
     await _dismiss_gdpr_consent(page)
+    await _dismiss_popup_overlays(page)
 
     # ── Platform-specific handlers first ─────────────────────────────────────
     rc_result = await _enter_rafflecopter(page, profile)
@@ -2012,6 +2171,13 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
         if state_value:
             await _fill_state(page, state_value)
 
+        # Smart phone formatting (detect format from placeholder)
+        phone = profile.get("phone", "")
+        if phone:
+            phone_filled = await _fill_phone_smart(page, phone)
+            if phone_filled:
+                fields_filled += 1
+
         # date-type DOB inputs and combined DOB text fields
         dob_filled = await _fill_dob_date_input(page, profile)
         fields_filled += dob_filled
@@ -2026,6 +2192,8 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
         gender = profile.get("gender", "M")
         await _handle_gender(page, gender)
 
+        # Dismiss any popup overlay that may have appeared after filling
+        await _dismiss_popup_overlays(page)
         await _check_terms(page)
 
         total_fields_filled += fields_filled
