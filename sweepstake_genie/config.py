@@ -29,6 +29,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 }
 
 
+# Profile fields that almost every sweepstakes entry form needs. A profile
+# missing these will silently fail to fill most forms, so we warn loudly.
+RECOMMENDED_PROFILE_FIELDS: tuple[str, ...] = (
+    "first_name", "last_name", "email",
+    "address1", "city", "state", "zip",
+)
+
+
 # ── Config class ─────────────────────────────────────────────────────────────
 
 class Config:
@@ -60,6 +68,28 @@ class Config:
                 f"'profile' section missing or empty in {self.profile_path}"
             )
         self.profile = {k: str(v) for k, v in raw_profile.items()}
+
+        # Warn about missing/empty recommended fields — these are the most
+        # common cause of "no_form" results on otherwise-fillable pages.
+        missing = [
+            f for f in RECOMMENDED_PROFILE_FIELDS
+            if not self.profile.get(f, "").strip()
+        ]
+        if missing:
+            logger.warning(
+                "Profile is missing recommended fields: %s — many forms will not "
+                "fill completely. Add them to %s.",
+                ", ".join(missing), self.profile_path,
+            )
+
+        # Sanity-check that the two email fields match when both are present.
+        email = self.profile.get("email", "").strip()
+        email_confirm = self.profile.get("email_confirm", "").strip()
+        if email and email_confirm and email.lower() != email_confirm.lower():
+            logger.warning(
+                "Profile 'email' and 'email_confirm' do not match — "
+                "confirmation fields will fail validation on some forms."
+            )
 
         raw_settings = self._data.get("settings", {})
         unknown = set(raw_settings) - set(DEFAULT_SETTINGS)

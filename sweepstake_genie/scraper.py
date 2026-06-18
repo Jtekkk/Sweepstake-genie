@@ -13,13 +13,19 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Callable
 from urllib.parse import urljoin, urlparse, parse_qs, urlencode
 
 import requests
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
+
+# Number of sources fetched concurrently. Each source hits a distinct host, so
+# parallelising across sources does not hammer any single server (per-host
+# politeness is preserved by the intra-source _DELAY between page fetches).
+_MAX_WORKERS = 12
 
 # ── URL normalisation ─────────────────────────────────────────────────────────
 
@@ -918,14 +924,24 @@ _REDDIT_SUBS: list[str] = [
 # Generic scraper engine
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _get(url: str, session: requests.Session) -> BeautifulSoup | None:
-    try:
-        resp = session.get(url, headers=_HEADERS, timeout=_TIMEOUT)
-        resp.raise_for_status()
-        return BeautifulSoup(resp.text, "html.parser")
-    except requests.RequestException as exc:
-        logger.warning("Failed to fetch %s: %s", url, exc)
-        return None
+def _get(url: str, session: requests.Session, *, retries: int = 2) -> BeautifulSoup | None:
+    """Fetch *url* and parse to soup, retrying transient failures with backoff."""
+    last_exc: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            resp = session.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+            resp.raise_for_status()
+            return BeautifulSoup(resp.text, "html.parser")
+        except requests.RequestException as exc:
+            last_exc = exc
+            # Don't retry on 4xx client errors — they won't succeed on retry
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status is not None and 400 <= status < 500:
+                break
+            if attempt < retries:
+                time.sleep(_DELAY * (attempt + 1))  # linear backoff
+    logger.warning("Failed to fetch %s: %s", url, last_exc)
+    return None
 
 
 def _should_skip(url: str) -> bool:
@@ -1108,9 +1124,25 @@ def _scrape_reddit_subs(subreddits: list[str]) -> list[dict[str, Any]]:
 # Master discovery function
 # ══════════════════════════════════════════════════════════════════════════════
 
-def discover_all() -> list[dict[str, Any]]:
+def discover_all(
+    *,
+    max_workers: int = _MAX_WORKERS,
+    progress: Callable[[int, int, str], None] | None = None,
+) -> list[dict[str, Any]]:
     """
-    Run all scrapers, deduplicate by URL, and return the combined list.
+    Run all scrapers concurrently, deduplicate by URL, and return the combined list.
+
+    Sources are fetched in parallel across a thread pool — each source targets a
+    distinct host, so per-host rate-limiting (the intra-source delay) is preserved
+    while overall wall-clock time drops dramatically versus serial scraping.
+
+    Parameters
+    ----------
+    max_workers:
+        Maximum number of sources fetched concurrently.
+    progress:
+        Optional callback invoked as ``progress(done, total, source_name)`` after
+        each source completes — useful for driving a progress bar.
 
     Returns
     -------
@@ -1127,30 +1159,39 @@ def discover_all() -> list[dict[str, Any]]:
                 seen_urls.add(normalized)
                 combined.append(e)
 
-    # ── Page sources ─────────────────────────────────────────────────────────
+    # Build a flat list of (name, callable) tasks. Each callable returns a list
+    # of result dicts and isolates its own failures.
+    tasks: list[tuple[str, Callable[[], list[dict[str, Any]]]]] = []
+
     for cfg in _PAGE_SOURCES:
-        try:
-            _add(_scrape_pages(
-                cfg["base"],
-                cfg["pages"],
-                cfg["name"],
-                container_selector=cfg.get("selector"),
-            ))
-        except Exception as exc:
-            logger.error("Page scraper '%s' failed: %s", cfg["name"], exc)
-
-    # ── RSS sources ──────────────────────────────────────────────────────────
+        tasks.append((
+            cfg["name"],
+            lambda c=cfg: _scrape_pages(
+                c["base"], c["pages"], c["name"],
+                container_selector=c.get("selector"),
+            ),
+        ))
     for cfg in _RSS_SOURCES:
-        try:
-            _add(_scrape_rss(cfg["feed"], cfg["name"]))
-        except Exception as exc:
-            logger.error("RSS scraper '%s' failed: %s", cfg["name"], exc)
+        tasks.append((cfg["name"], lambda c=cfg: _scrape_rss(c["feed"], c["name"])))
+    tasks.append(("reddit", lambda: _scrape_reddit_subs(_REDDIT_SUBS)))
 
-    # ── Reddit ───────────────────────────────────────────────────────────────
-    try:
-        _add(_scrape_reddit_subs(_REDDIT_SUBS))
-    except Exception as exc:
-        logger.error("Reddit scraper failed: %s", exc)
+    total = len(tasks)
+    done = 0
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_name = {executor.submit(fn): name for name, fn in tasks}
+        for future in as_completed(future_to_name):
+            name = future_to_name[future]
+            try:
+                _add(future.result())
+            except Exception as exc:
+                logger.error("Scraper '%s' failed: %s", name, exc)
+            done += 1
+            if progress is not None:
+                try:
+                    progress(done, total, name)
+                except Exception:
+                    pass  # never let a progress callback break discovery
 
     logger.info("discover_all: %d unique sweepstakes total", len(combined))
     return combined

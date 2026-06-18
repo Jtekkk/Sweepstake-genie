@@ -9,6 +9,7 @@ import logging
 from typing import Any
 
 from rich.console import Console
+from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
 from .browser import BrowserManager
@@ -37,14 +38,26 @@ def _status_icon(status: str) -> str:
 # ── Discovery ─────────────────────────────────────────────────────────────────
 
 def run_discover(db: Database) -> int:
-    """Scrape all sources and save new sweepstakes to the database."""
+    """Scrape all sources concurrently and save new sweepstakes to the database."""
     console.print("[bold cyan]Discovering sweepstakes…[/bold cyan]")
-    sweepstakes = discover_all()
-    new_count = 0
-    for sw in sweepstakes:
-        added = db.add_sweepstake(sw["url"], sw["title"], sw["source"])
-        if added:
-            new_count += 1
+
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TextColumn("[dim]{task.fields[source]}[/dim]"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Scraping sources", total=None, source="")
+
+        def _on_progress(done: int, total: int, source: str) -> None:
+            progress.update(task, total=total, completed=done, source=source)
+
+        sweepstakes = discover_all(progress=_on_progress)
+
+    new_count = db.add_sweepstakes_bulk(sweepstakes)
     console.print(
         f"[green]Found {len(sweepstakes)} sweepstakes, "
         f"{new_count} new added to database.[/green]"
@@ -179,8 +192,34 @@ async def _run_enter_async(config: Config, db: Database) -> None:
     console.print(table)
 
 
+def _warn_if_captcha_unusable(config: Config) -> None:
+    """Warn early if a CAPTCHA service is configured but appears unusable."""
+    if config.captcha_service == "none" or not config.captcha_api_key:
+        return
+    solver = CaptchaSolver(
+        service=config.captcha_service,
+        api_key=config.captcha_api_key,
+    )
+    balance = solver.check_balance()
+    if balance is None:
+        console.print(
+            f"[yellow]⚠ Could not verify {config.captcha_service} balance — "
+            "the API key may be invalid or the service unreachable.[/yellow]"
+        )
+    elif balance <= 0:
+        console.print(
+            f"[yellow]⚠ {config.captcha_service} balance is ${balance:.2f} — "
+            "CAPTCHAs will not be solved until you top up.[/yellow]"
+        )
+    else:
+        console.print(
+            f"[dim]{config.captcha_service} balance: ${balance:.2f}[/dim]"
+        )
+
+
 def run_enter(config: Config, db: Database) -> None:
     """Entry point for the entry phase — runs parallel workers."""
+    _warn_if_captcha_unusable(config)
     asyncio.run(_run_enter_async(config, db))
 
 

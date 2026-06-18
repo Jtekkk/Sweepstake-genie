@@ -348,6 +348,37 @@ def test_db_url_exists():
     assert db.url_exists(url)
 
 
+def test_db_add_sweepstakes_bulk():
+    db = _make_db()
+    entries = [
+        {"url": "https://a.com", "title": "A", "source": "t"},
+        {"url": "https://b.com", "title": "B", "source": "t"},
+        {"url": "https://c.com", "title": "C", "source": "t"},
+    ]
+    new_count = db.add_sweepstakes_bulk(entries)
+    assert new_count == 3, f"Expected 3 new, got {new_count}"
+    assert db.url_exists("https://a.com")
+    assert db.url_exists("https://c.com")
+
+
+def test_db_add_sweepstakes_bulk_dedup():
+    db = _make_db()
+    db.add_sweepstake("https://a.com", "A", "t")  # pre-existing
+    entries = [
+        {"url": "https://a.com", "title": "A", "source": "t"},  # dup
+        {"url": "https://b.com", "title": "B", "source": "t"},  # new
+    ]
+    new_count = db.add_sweepstakes_bulk(entries)
+    assert new_count == 1, f"Expected 1 new (one dup), got {new_count}"
+
+
+def test_db_add_sweepstakes_bulk_empty():
+    db = _make_db()
+    assert db.add_sweepstakes_bulk([]) == 0
+    # entries without a url are skipped
+    assert db.add_sweepstakes_bulk([{"title": "no url"}]) == 0
+
+
 for fn in [
     test_db_add_sweepstake,
     test_db_duplicate_insert,
@@ -363,6 +394,9 @@ for fn in [
     test_db_get_due_for_reentry_today,
     test_db_get_due_for_reentry_yesterday,
     test_db_url_exists,
+    test_db_add_sweepstakes_bulk,
+    test_db_add_sweepstakes_bulk_dedup,
+    test_db_add_sweepstakes_bulk_empty,
 ]:
     run_test(f"db: {fn.__name__.replace('test_db_', '')}", fn)
 
@@ -554,12 +588,68 @@ def test_should_skip():
     assert _should_skip("https://contestbee.com/sweepstakes/") is False
 
 
+def test_discover_all_progress_callback():
+    """discover_all should invoke the progress callback for every source."""
+    from sweepstake_genie import scraper
+    import requests
+
+    mock_resp_html = MagicMock()
+    mock_resp_html.text = _MOCK_HTML
+    mock_resp_html.raise_for_status = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.text = _VALID_RSS
+    mock_resp.raise_for_status = MagicMock()
+
+    def mock_get(url, *args, **kwargs):
+        if "feed" in url:
+            return mock_resp
+        if "reddit.com" in url:
+            r = MagicMock()
+            r.json.return_value = {"data": {"children": []}}
+            r.raise_for_status = MagicMock()
+            return r
+        return mock_resp_html
+
+    calls: list[tuple[int, int, str]] = []
+
+    def on_progress(done, total, name):
+        calls.append((done, total, name))
+
+    with patch.object(requests.Session, "get", side_effect=mock_get), \
+         patch("sweepstake_genie.scraper.time") as mock_time:
+        mock_time.sleep = MagicMock()
+        scraper.discover_all(max_workers=4, progress=on_progress)
+
+    assert calls, "progress callback was never invoked"
+    # Final call's 'done' should equal 'total' (all sources accounted for)
+    final_done, final_total, _ = calls[-1]
+    assert final_done == final_total, f"progress ended at {final_done}/{final_total}"
+
+
+def test_get_retries_on_failure():
+    """_get should retry transient failures and eventually return None."""
+    from sweepstake_genie import scraper
+    import requests
+
+    session = MagicMock()
+    session.get.side_effect = requests.RequestException("boom")
+
+    with patch("sweepstake_genie.scraper.time") as mock_time:
+        mock_time.sleep = MagicMock()
+        result = scraper._get("https://x.com", session, retries=2)
+
+    assert result is None
+    assert session.get.call_count == 3, f"Expected 3 attempts, got {session.get.call_count}"
+
+
 for fn in [
     test_scrape_rss_valid,
     test_scrape_rss_filters_non_sweeps,
     test_scrape_pages_basic,
     test_scrape_pages_skips_twitter,
     test_discover_all_mocked,
+    test_discover_all_progress_callback,
+    test_get_retries_on_failure,
     test_looks_like_sweepstake,
     test_normalize_url,
     test_should_skip,

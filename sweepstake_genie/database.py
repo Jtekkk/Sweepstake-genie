@@ -56,6 +56,7 @@ class Database:
         conn = sqlite3.connect(str(self.db_path), timeout=10)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")  # safe with WAL, much faster writes
         try:
             yield conn
             conn.commit()
@@ -101,6 +102,46 @@ class Database:
                 (url, title, source, self._now(), STATUS_PENDING),
             )
             return cursor.rowcount == 1
+
+    def add_sweepstakes_bulk(
+        self, entries: list[dict[str, Any]]
+    ) -> int:
+        """
+        Insert many sweepstakes in a single transaction.
+
+        Each entry must have ``url``; ``title`` and ``source`` are optional.
+        Existing URLs are left unchanged (INSERT OR IGNORE).
+
+        Returns the number of newly inserted rows. Far faster than calling
+        :meth:`add_sweepstake` in a loop because it uses one connection and one
+        transaction instead of one per row.
+        """
+        if not entries:
+            return 0
+        now = self._now()
+        rows = [
+            (
+                e["url"],
+                e.get("title", e["url"]),
+                e.get("source", ""),
+                now,
+                STATUS_PENDING,
+            )
+            for e in entries
+            if e.get("url")
+        ]
+        if not rows:
+            return 0
+        with self._conn() as conn:
+            before = conn.total_changes
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO sweepstakes (url, title, source, discovered_at, status)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            return conn.total_changes - before
 
     def get_pending(self) -> list[dict[str, Any]]:
         """Return all sweepstakes whose status is 'pending'."""
