@@ -77,6 +77,9 @@ async def _enter_worker(
     captcha_solver,
     semaphore: asyncio.Semaphore,
     stop_event: asyncio.Event,
+    *,
+    defer_captcha: bool = False,
+    deferred_sink: list | None = None,
 ) -> None:
     """Enter a single sweepstake inside a semaphore-guarded slot."""
     async with semaphore:
@@ -91,8 +94,21 @@ async def _enter_worker(
                 page, url, config.profile, captcha_solver,
                 manual_captcha=config.manual_captcha,
                 manual_captcha_timeout=config.manual_captcha_timeout,
+                defer_captcha=defer_captcha,
             )
             status = result["status"]
+            if status == "needs_captcha":
+                # Headless pass found an interactive CAPTCHA — queue it for the
+                # visible pass instead of marking it in the database now.
+                if deferred_sink is not None:
+                    deferred_sink.append(sw)
+                    console.print(
+                        f"  [cyan]⧗[/cyan] [{idx}/{total}] {title} [needs CAPTCHA → queued]"
+                    )
+                else:
+                    db.mark_captcha(url)
+                    console.print(f"  [yellow]⚠[/yellow] [{idx}/{total}] {title} [captcha]")
+                return
             if status == "entered":
                 db.mark_entered(url)
                 if result.get("allows_daily"):
@@ -170,37 +186,72 @@ async def _run_enter_async(config: Config, db: Database) -> None:
         console.print(f"[dim]{len(all_entries)} entries available; capping at {limit}[/dim]")
         all_entries = all_entries[:limit]
 
-    total       = len(all_entries)
+    total      = len(all_entries)
+    stop_event = asyncio.Event()
 
-    # Manual CAPTCHA mode: force a single visible browser so the user can solve
-    # one CAPTCHA at a time. Running headless or in parallel would make manual
-    # solving impossible.
-    headless    = config.headless
-    concurrency = config.concurrency
     if config.manual_captcha:
-        headless = False
-        concurrency = 1
+        # ── Two-pass manual mode ──────────────────────────────────────────────
+        # Pass 1 runs everything HEADLESS (no window) and simply queues any page
+        # that shows a real, interactive CAPTCHA. Pass 2 opens a single VISIBLE
+        # window, one page at a time, only for those queued pages — so windows
+        # appear for CAPTCHAs, never for ordinary entry pages.
+        deferred: list[dict] = []
+        concurrency = max(1, config.concurrency)
         console.print(
-            "[bold yellow]Manual CAPTCHA mode:[/bold yellow] browser is visible and "
-            "workers are limited to 1. Solve each CAPTCHA in the window when prompted "
-            f"(waiting up to {int(config.manual_captcha_timeout)}s each)."
+            f"[bold]Pass 1/2 — processing {total} sweepstakes in the background "
+            f"({concurrency} workers, no window)…[/bold]"
         )
+        sem1 = asyncio.Semaphore(concurrency)
+        async with BrowserManager(headless=True) as bm:
+            tasks = [
+                _enter_worker(bm, sw, i + 1, total, config, db, captcha_solver,
+                              sem1, stop_event,
+                              defer_captcha=True, deferred_sink=deferred)
+                for i, sw in enumerate(all_entries)
+            ]
+            for r in await asyncio.gather(*tasks, return_exceptions=True):
+                if isinstance(r, BaseException):
+                    logger.error("Worker task raised unhandled exception: %s", r)
 
-    semaphore   = asyncio.Semaphore(concurrency)
-    stop_event  = asyncio.Event()
-
-    console.print(f"[bold]Entering {total} sweepstakes ({concurrency} parallel workers)…[/bold]")
-
-    async with BrowserManager(headless=headless) as bm:
-        tasks = [
-            _enter_worker(bm, sw, i + 1, total, config, db, captcha_solver,
-                          semaphore, stop_event)
-            for i, sw in enumerate(all_entries)
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for r in results:
-            if isinstance(r, BaseException):
-                logger.error("Worker task raised unhandled exception: %s", r)
+        if deferred:
+            n = len(deferred)
+            console.print(
+                f"\n[bold yellow]Pass 2/2 — {n} sweepstake(s) need a CAPTCHA.[/bold yellow] "
+                "A browser window will open for each one; solve it and the entry "
+                f"finishes automatically (up to {int(config.manual_captcha_timeout)}s each)."
+            )
+            sem2 = asyncio.Semaphore(1)  # one visible window at a time
+            async with BrowserManager(headless=False) as bm:
+                tasks = [
+                    _enter_worker(bm, sw, i + 1, n, config, db, captcha_solver,
+                                  sem2, stop_event,
+                                  defer_captcha=False, deferred_sink=None)
+                    for i, sw in enumerate(deferred)
+                ]
+                for r in await asyncio.gather(*tasks, return_exceptions=True):
+                    if isinstance(r, BaseException):
+                        logger.error("Worker task raised unhandled exception: %s", r)
+        else:
+            console.print(
+                "[green]No CAPTCHAs needed solving — everything ran in the "
+                "background with no window.[/green]"
+            )
+    else:
+        # ── Standard single-pass mode ─────────────────────────────────────────
+        concurrency = config.concurrency
+        semaphore   = asyncio.Semaphore(concurrency)
+        console.print(
+            f"[bold]Entering {total} sweepstakes ({concurrency} parallel workers)…[/bold]"
+        )
+        async with BrowserManager(headless=config.headless) as bm:
+            tasks = [
+                _enter_worker(bm, sw, i + 1, total, config, db, captcha_solver,
+                              semaphore, stop_event)
+                for i, sw in enumerate(all_entries)
+            ]
+            for r in await asyncio.gather(*tasks, return_exceptions=True):
+                if isinstance(r, BaseException):
+                    logger.error("Worker task raised unhandled exception: %s", r)
 
     stats = db.get_stats()
     console.print()

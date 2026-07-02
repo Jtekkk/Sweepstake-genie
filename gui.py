@@ -615,10 +615,9 @@ class SweepstakeGenieApp(ctk.CTk):
                 _manual_captcha = getattr(config, 'manual_captcha', False)
                 _manual_timeout = getattr(config, 'manual_captcha_timeout', 180.0)
                 _run_headless = config.headless
-                if _manual_captcha:
-                    # Manual mode: one visible window so CAPTCHAs can be solved by hand
-                    concurrency = 1
-                    _run_headless = False
+                # Manual mode uses a two-pass flow (headless bulk pass, then a
+                # visible window ONLY for pages that actually show a CAPTCHA), so
+                # we do not force headless/concurrency here — each pass sets its own.
                 self._log_queue.put(("status", f"Entering {len(pending)} sweepstakes…"))
                 self._log_queue.put(
                     f"[{_ts()}] Entering {len(pending)} sweepstakes "
@@ -636,88 +635,130 @@ class SweepstakeGenieApp(ctk.CTk):
                     api_key=config.captcha_api_key,
                 )
 
-                async def _run_entries() -> None:
-                    semaphore = asyncio.Semaphore(concurrency)
-
-                    async def _enter_one(idx: int, sw: dict) -> None:
-                        async with semaphore:
-                            if self._stop_flag.is_set():
-                                return
-                            url   = sw["url"]
-                            title = (sw.get("title") or url)[:70]
-                            page  = None
-                            try:
-                                page = await bm.new_page()
-                                result = await enter_sweepstake(
-                                    page, url, config.profile,
-                                    captcha_solver=captcha_solver,
-                                    manual_captcha=_manual_captcha,
-                                    manual_captcha_timeout=_manual_timeout,
-                                )
-                                status = result["status"]
-                                if status == "entered":
-                                    db.mark_entered(url)
-                                    if result.get("allows_daily"):
-                                        db.mark_allows_daily(url)
-                                    counts["entered"] += 1
-                                    icon = "✓"
-                                elif status == "captcha":
+                async def _enter_one(bm, sem, idx: int, sw: dict,
+                                     defer_captcha: bool, deferred_sink) -> None:
+                    async with sem:
+                        if self._stop_flag.is_set():
+                            return
+                        url   = sw["url"]
+                        title = (sw.get("title") or url)[:70]
+                        page  = None
+                        try:
+                            page = await bm.new_page()
+                            result = await enter_sweepstake(
+                                page, url, config.profile,
+                                captcha_solver=captcha_solver,
+                                manual_captcha=_manual_captcha,
+                                manual_captcha_timeout=_manual_timeout,
+                                defer_captcha=defer_captcha,
+                            )
+                            status = result["status"]
+                            if status == "needs_captcha":
+                                if deferred_sink is not None:
+                                    deferred_sink.append(sw)
+                                    self._log_queue.put(
+                                        f"[{_ts()}] ⧗ [{idx}/{total}] {title} [needs CAPTCHA → queued]"
+                                    )
+                                else:
                                     db.mark_captcha(url)
                                     counts["captcha"] += 1
-                                    icon = "⚠"
-                                elif status == "expired":
-                                    db.mark_skipped(url, "expired")
-                                    counts["expired"] += 1
-                                    icon = "⌛"
-                                elif status == "no_form":
-                                    db.mark_skipped(url, "no entry form detected")
-                                    counts["no_form"] += 1
-                                    icon = "–"
-                                else:
-                                    msg = result.get("message", "unknown error")
-                                    db.mark_error(url, msg)
-                                    counts["error"] += 1
-                                    icon = "✗"
-                                detail = ""
-                                if status == "captcha":
-                                    detail = " [captcha]"
-                                elif status == "expired":
-                                    detail = " [expired]"
-                                elif status == "no_form":
-                                    detail = " [no form]"
-                                elif status == "error":
-                                    msg = result.get("message", "error")
-                                    detail = f" [{msg[:40]}]"
-                                self._log_queue.put(
-                                    f"[{_ts()}] {icon} [{idx}/{total}] {title}{detail}"
-                                )
+                                    self._log_queue.put(
+                                        f"[{_ts()}] ⚠ [{idx}/{total}] {title} [captcha]"
+                                    )
                                 self._log_queue.put(("stats_refresh", None))
-                                self._log_queue.put(("progress", idx / total))
-                            except Exception as exc:
-                                db.mark_error(url, str(exc))
+                                return
+                            if status == "entered":
+                                db.mark_entered(url)
+                                if result.get("allows_daily"):
+                                    db.mark_allows_daily(url)
+                                counts["entered"] += 1
+                                icon = "✓"
+                            elif status == "captcha":
+                                db.mark_captcha(url)
+                                counts["captcha"] += 1
+                                icon = "⚠"
+                            elif status == "expired":
+                                db.mark_skipped(url, "expired")
+                                counts["expired"] += 1
+                                icon = "⌛"
+                            elif status == "no_form":
+                                db.mark_skipped(url, "no entry form detected")
+                                counts["no_form"] += 1
+                                icon = "–"
+                            else:
+                                msg = result.get("message", "unknown error")
+                                db.mark_error(url, msg)
                                 counts["error"] += 1
-                                self._log_queue.put(
-                                    f"[{_ts()}] ✗ [{idx}/{total}] {title} — {exc}"
-                                )
-                                self._log_queue.put(("stats_refresh", None))
-                            finally:
-                                if page is not None:
-                                    try:
-                                        await page.close()
-                                    except Exception:
-                                        pass
-                            if config.delay_between_entries > 0:
-                                await asyncio.sleep(config.delay_between_entries)
+                                icon = "✗"
+                            detail = ""
+                            if status == "captcha":
+                                detail = " [captcha]"
+                            elif status == "expired":
+                                detail = " [expired]"
+                            elif status == "no_form":
+                                detail = " [no form]"
+                            elif status == "error":
+                                msg = result.get("message", "error")
+                                detail = f" [{msg[:40]}]"
+                            self._log_queue.put(
+                                f"[{_ts()}] {icon} [{idx}/{total}] {title}{detail}"
+                            )
+                            self._log_queue.put(("stats_refresh", None))
+                            self._log_queue.put(("progress", idx / total))
+                        except Exception as exc:
+                            db.mark_error(url, str(exc))
+                            counts["error"] += 1
+                            self._log_queue.put(
+                                f"[{_ts()}] ✗ [{idx}/{total}] {title} — {exc}"
+                            )
+                            self._log_queue.put(("stats_refresh", None))
+                        finally:
+                            if page is not None:
+                                try:
+                                    await page.close()
+                                except Exception:
+                                    pass
+                        if config.delay_between_entries > 0:
+                            await asyncio.sleep(config.delay_between_entries)
 
-                    async with BrowserManager(headless=_run_headless) as bm:
+                async def _run_batch(entries, *, headless, workers,
+                                     defer_captcha, deferred_sink) -> None:
+                    sem = asyncio.Semaphore(max(1, workers))
+                    async with BrowserManager(headless=headless) as bm:
                         tasks = [
-                            _enter_one(i + 1, sw)
-                            for i, sw in enumerate(pending)
+                            _enter_one(bm, sem, i + 1, sw, defer_captcha, deferred_sink)
+                            for i, sw in enumerate(entries)
                         ]
-                        _results = await asyncio.gather(*tasks, return_exceptions=True)
-                        for _r in _results:
+                        for _r in await asyncio.gather(*tasks, return_exceptions=True):
                             if isinstance(_r, BaseException):
                                 logging.getLogger(__name__).error("Worker task failed: %s", _r)
+
+                async def _run_entries() -> None:
+                    if _manual_captcha:
+                        # Pass 1: headless bulk — queue pages that show a real CAPTCHA
+                        deferred: list = []
+                        self._log_queue.put(
+                            f"[{_ts()}] Pass 1/2 — processing {total} in the background "
+                            f"({concurrency} workers, no window)…"
+                        )
+                        await _run_batch(pending, headless=True, workers=concurrency,
+                                         defer_captcha=True, deferred_sink=deferred)
+                        # Pass 2: visible window, one at a time, only for CAPTCHA pages
+                        if deferred and not self._stop_flag.is_set():
+                            self._log_queue.put(
+                                f"[{_ts()}] Pass 2/2 — {len(deferred)} need a CAPTCHA; "
+                                "a window will open for each one to solve…"
+                            )
+                            await _run_batch(deferred, headless=False, workers=1,
+                                             defer_captcha=False, deferred_sink=None)
+                        elif not deferred:
+                            self._log_queue.put(
+                                f"[{_ts()}] No CAPTCHAs needed solving — all done in the background."
+                            )
+                    else:
+                        await _run_batch(pending, headless=_run_headless,
+                                         workers=concurrency,
+                                         defer_captcha=False, deferred_sink=None)
 
                 if not ensure_browser_installed(
                     progress_cb=lambda m: self._log_queue.put(f"[{_ts()}] {m}")
@@ -812,93 +853,132 @@ class SweepstakeGenieApp(ctk.CTk):
                 _manual_captcha = getattr(config, 'manual_captcha', False)
                 _manual_timeout = getattr(config, 'manual_captcha_timeout', 180.0)
                 _run_headless = config.headless
-                if _manual_captcha:
-                    # Manual mode: one visible window so CAPTCHAs can be solved by hand
-                    concurrency = 1
-                    _run_headless = False
+                # Manual mode uses a two-pass flow (headless bulk pass, then a
+                # visible window ONLY for pages that actually show a CAPTCHA), so
+                # we do not force headless/concurrency here — each pass sets its own.
 
-                async def _run_daily() -> None:
-                    semaphore = asyncio.Semaphore(concurrency)
-
-                    async def _enter_one_daily(idx: int, sw: dict) -> None:
-                        async with semaphore:
-                            if self._stop_flag.is_set():
-                                return
-                            url   = sw["url"]
-                            title = (sw.get("title") or url)[:70]
-                            page  = None
-                            try:
-                                page = await bm.new_page()
-                                result = await enter_sweepstake(
-                                    page, url, config.profile,
-                                    captcha_solver=captcha_solver,
-                                    manual_captcha=_manual_captcha,
-                                    manual_captcha_timeout=_manual_timeout,
-                                )
-                                status = result["status"]
-                                if status == "entered":
-                                    db.mark_entered(url)
-                                    if result.get("allows_daily"):
-                                        db.mark_allows_daily(url)
-                                    counts["entered"] += 1
-                                    icon = "✓"
-                                elif status == "captcha":
+                async def _enter_one_daily(bm, sem, idx: int, sw: dict,
+                                           defer_captcha: bool, deferred_sink) -> None:
+                    async with sem:
+                        if self._stop_flag.is_set():
+                            return
+                        url   = sw["url"]
+                        title = (sw.get("title") or url)[:70]
+                        page  = None
+                        try:
+                            page = await bm.new_page()
+                            result = await enter_sweepstake(
+                                page, url, config.profile,
+                                captcha_solver=captcha_solver,
+                                manual_captcha=_manual_captcha,
+                                manual_captcha_timeout=_manual_timeout,
+                                defer_captcha=defer_captcha,
+                            )
+                            status = result["status"]
+                            if status == "needs_captcha":
+                                if deferred_sink is not None:
+                                    deferred_sink.append(sw)
+                                    self._log_queue.put(
+                                        f"[{_ts()}] ⧗ [{idx}/{total}] {title} [needs CAPTCHA → queued]"
+                                    )
+                                else:
                                     db.mark_captcha(url)
                                     counts["captcha"] += 1
-                                    icon = "⚠"
-                                elif status == "expired":
-                                    db.mark_skipped(url, "expired")
-                                    counts["expired"] += 1
-                                    icon = "⌛"
-                                elif status == "no_form":
-                                    db.mark_skipped(url, "no entry form detected")
-                                    counts["no_form"] += 1
-                                    icon = "–"
-                                else:
-                                    msg = result.get("message", "unknown error")
-                                    db.mark_error(url, msg)
-                                    counts["error"] += 1
-                                    icon = "✗"
-                                detail = ""
-                                if status == "captcha":
-                                    detail = " [captcha]"
-                                elif status == "expired":
-                                    detail = " [expired]"
-                                elif status == "no_form":
-                                    detail = " [no form]"
-                                elif status == "error":
-                                    msg = result.get("message", "error")
-                                    detail = f" [{msg[:40]}]"
-                                self._log_queue.put(
-                                    f"[{_ts()}] {icon} [{idx}/{total}] {title}{detail}"
-                                )
+                                    self._log_queue.put(
+                                        f"[{_ts()}] ⚠ [{idx}/{total}] {title} [captcha]"
+                                    )
                                 self._log_queue.put(("stats_refresh", None))
-                                self._log_queue.put(("progress", idx / total))
-                            except Exception as exc:
-                                db.mark_error(url, str(exc))
+                                return
+                            if status == "entered":
+                                db.mark_entered(url)
+                                if result.get("allows_daily"):
+                                    db.mark_allows_daily(url)
+                                counts["entered"] += 1
+                                icon = "✓"
+                            elif status == "captcha":
+                                db.mark_captcha(url)
+                                counts["captcha"] += 1
+                                icon = "⚠"
+                            elif status == "expired":
+                                db.mark_skipped(url, "expired")
+                                counts["expired"] += 1
+                                icon = "⌛"
+                            elif status == "no_form":
+                                db.mark_skipped(url, "no entry form detected")
+                                counts["no_form"] += 1
+                                icon = "–"
+                            else:
+                                msg = result.get("message", "unknown error")
+                                db.mark_error(url, msg)
                                 counts["error"] += 1
-                                self._log_queue.put(
-                                    f"[{_ts()}] ✗ [{idx}/{total}] {title} — {exc}"
-                                )
-                                self._log_queue.put(("stats_refresh", None))
-                            finally:
-                                if page is not None:
-                                    try:
-                                        await page.close()
-                                    except Exception:
-                                        pass
-                            if config.delay_between_entries > 0:
-                                await asyncio.sleep(config.delay_between_entries)
+                                icon = "✗"
+                            detail = ""
+                            if status == "captcha":
+                                detail = " [captcha]"
+                            elif status == "expired":
+                                detail = " [expired]"
+                            elif status == "no_form":
+                                detail = " [no form]"
+                            elif status == "error":
+                                msg = result.get("message", "error")
+                                detail = f" [{msg[:40]}]"
+                            self._log_queue.put(
+                                f"[{_ts()}] {icon} [{idx}/{total}] {title}{detail}"
+                            )
+                            self._log_queue.put(("stats_refresh", None))
+                            self._log_queue.put(("progress", idx / total))
+                        except Exception as exc:
+                            db.mark_error(url, str(exc))
+                            counts["error"] += 1
+                            self._log_queue.put(
+                                f"[{_ts()}] ✗ [{idx}/{total}] {title} — {exc}"
+                            )
+                            self._log_queue.put(("stats_refresh", None))
+                        finally:
+                            if page is not None:
+                                try:
+                                    await page.close()
+                                except Exception:
+                                    pass
+                        if config.delay_between_entries > 0:
+                            await asyncio.sleep(config.delay_between_entries)
 
-                    async with BrowserManager(headless=_run_headless) as bm:
+                async def _run_daily_batch(entries, *, headless, workers,
+                                           defer_captcha, deferred_sink) -> None:
+                    sem = asyncio.Semaphore(max(1, workers))
+                    async with BrowserManager(headless=headless) as bm:
                         tasks = [
-                            _enter_one_daily(i + 1, sw)
-                            for i, sw in enumerate(pending)
+                            _enter_one_daily(bm, sem, i + 1, sw, defer_captcha, deferred_sink)
+                            for i, sw in enumerate(entries)
                         ]
-                        _results = await asyncio.gather(*tasks, return_exceptions=True)
-                        for _r in _results:
+                        for _r in await asyncio.gather(*tasks, return_exceptions=True):
                             if isinstance(_r, BaseException):
                                 logging.getLogger(__name__).error("Worker task failed: %s", _r)
+
+                async def _run_daily() -> None:
+                    if _manual_captcha:
+                        deferred: list = []
+                        self._log_queue.put(
+                            f"[{_ts()}] Pass 1/2 — processing {total} in the background "
+                            f"({concurrency} workers, no window)…"
+                        )
+                        await _run_daily_batch(pending, headless=True, workers=concurrency,
+                                               defer_captcha=True, deferred_sink=deferred)
+                        if deferred and not self._stop_flag.is_set():
+                            self._log_queue.put(
+                                f"[{_ts()}] Pass 2/2 — {len(deferred)} need a CAPTCHA; "
+                                "a window will open for each one to solve…"
+                            )
+                            await _run_daily_batch(deferred, headless=False, workers=1,
+                                                   defer_captcha=False, deferred_sink=None)
+                        elif not deferred:
+                            self._log_queue.put(
+                                f"[{_ts()}] No CAPTCHAs needed solving — all done in the background."
+                            )
+                    else:
+                        await _run_daily_batch(pending, headless=_run_headless,
+                                               workers=concurrency,
+                                               defer_captcha=False, deferred_sink=None)
 
                 if not ensure_browser_installed(
                     progress_cb=lambda m: self._log_queue.put(f"[{_ts()}] {m}")

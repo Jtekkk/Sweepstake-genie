@@ -915,6 +915,45 @@ async def test_detect_captcha_none_on_plain_page():
     assert interactive is False
 
 
+async def test_defer_captcha_returns_needs_captcha():
+    """defer_captcha=True on an interactive v2 page returns needs_captcha."""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import fill_and_submit
+    html = """<html><body>
+    <form><input name="email" placeholder="Email"></form>
+    <div class="g-recaptcha" data-sitekey="XYZ"
+         style="width:304px;height:78px;background:#eee"></div>
+    </body></html>"""
+    async with BrowserManager(headless=True) as bm:
+        page = await bm.new_page()
+        await page.set_content(html)
+        result = await fill_and_submit(
+            page, _PROFILE, manual_captcha=True, defer_captcha=True
+        )
+        await page.close()
+    assert result["status"] == "needs_captcha", \
+        f"Interactive captcha with defer should return needs_captcha, got {result}"
+
+
+async def test_defer_captcha_ignores_invisible_v3():
+    """defer_captcha=True must NOT queue a page whose captcha is invisible v3."""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import fill_and_submit
+    html = """<html><body>
+    <form><input name="email" placeholder="Email"></form>
+    <div class="g-recaptcha" data-sitekey="V3" data-size="invisible"></div>
+    </body></html>"""
+    async with BrowserManager(headless=True) as bm:
+        page = await bm.new_page()
+        await page.set_content(html)
+        result = await fill_and_submit(
+            page, _PROFILE, manual_captcha=True, defer_captcha=True
+        )
+        await page.close()
+    assert result["status"] != "needs_captcha", \
+        f"Invisible v3 must not be queued for manual solve, got {result}"
+
+
 async def test_manual_mode_skips_invisible_v3():
     """Manual mode must NOT hang on a page that only has invisible v3."""
     from sweepstake_genie.browser import BrowserManager
@@ -948,6 +987,8 @@ for fn in [
     test_detect_captcha_invisible_v3_not_interactive,
     test_detect_captcha_none_on_plain_page,
     test_manual_mode_skips_invisible_v3,
+    test_defer_captcha_returns_needs_captcha,
+    test_defer_captcha_ignores_invisible_v3,
 ]:
     run_test(f"form_filler: {fn.__name__.replace('test_form_filler_', '').replace('test_', '')}", fn)
 

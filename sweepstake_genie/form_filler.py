@@ -2058,6 +2058,7 @@ async def fill_and_submit(
     *,
     manual_captcha: bool = False,
     manual_captcha_timeout: float = 180.0,
+    defer_captcha: bool = False,
 ) -> dict[str, Any]:
     """
     Attempt to fill and submit the entry form on the current page.
@@ -2075,10 +2076,16 @@ async def fill_and_submit(
         (visible) browser window instead of skipping or auto-solving.
     manual_captcha_timeout:
         How long, in seconds, to wait for the human to solve the CAPTCHA.
+    defer_captcha:
+        When True (used by the headless first pass), an interactive CAPTCHA is
+        *reported* — the function returns ``{"status": "needs_captcha"}`` right
+        away instead of waiting — so a later visible pass can open a window only
+        for the pages that actually need a human.
 
     Returns
     -------
-    dict with 'status' key: "entered" | "captcha" | "no_form" | "error"
+    dict with 'status' key: "entered" | "captcha" | "needs_captcha" |
+    "no_form" | "expired" | "error"
     """
     try:
         await page.wait_for_load_state("domcontentloaded", timeout=15_000)
@@ -2240,6 +2247,14 @@ async def fill_and_submit(
                     "Non-interactive CAPTCHA (likely reCAPTCHA v3) on %s — "
                     "no manual step needed, continuing.", page.url,
                 )
+            elif defer_captcha:
+                # Headless first pass: don't wait now — report that this page
+                # needs a human so a later visible pass can open a window for it.
+                logger.info(
+                    "Interactive CAPTCHA on %s — deferring to the visible pass.",
+                    page.url,
+                )
+                return {"status": "needs_captcha"}
             else:
                 # Human-in-the-loop: pause and let the user solve it in the browser.
                 logger.warning(
@@ -2379,6 +2394,7 @@ async def enter_sweepstake(
     *,
     manual_captcha: bool = False,
     manual_captcha_timeout: float = 180.0,
+    defer_captcha: bool = False,
 ) -> dict[str, Any]:
     """
     Navigate to *url* and attempt entry.  Wraps :func:`fill_and_submit` with
@@ -2397,6 +2413,7 @@ async def enter_sweepstake(
                 page, profile, captcha_solver=captcha_solver,
                 manual_captcha=manual_captcha,
                 manual_captcha_timeout=manual_captcha_timeout,
+                defer_captcha=defer_captcha,
             )
 
             # Annotate successful entries with daily re-entry flag
