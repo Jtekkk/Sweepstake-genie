@@ -612,6 +612,13 @@ class SweepstakeGenieApp(ctk.CTk):
                     pending = pending[:limit]
 
                 concurrency = getattr(config, 'concurrency', 3)
+                _manual_captcha = getattr(config, 'manual_captcha', False)
+                _manual_timeout = getattr(config, 'manual_captcha_timeout', 180.0)
+                _run_headless = config.headless
+                if _manual_captcha:
+                    # Manual mode: one visible window so CAPTCHAs can be solved by hand
+                    concurrency = 1
+                    _run_headless = False
                 self._log_queue.put(("status", f"Entering {len(pending)} sweepstakes…"))
                 self._log_queue.put(
                     f"[{_ts()}] Entering {len(pending)} sweepstakes "
@@ -643,7 +650,9 @@ class SweepstakeGenieApp(ctk.CTk):
                                 page = await bm.new_page()
                                 result = await enter_sweepstake(
                                     page, url, config.profile,
-                                    captcha_solver=captcha_solver
+                                    captcha_solver=captcha_solver,
+                                    manual_captcha=_manual_captcha,
+                                    manual_captcha_timeout=_manual_timeout,
                                 )
                                 status = result["status"]
                                 if status == "entered":
@@ -700,7 +709,7 @@ class SweepstakeGenieApp(ctk.CTk):
                             if config.delay_between_entries > 0:
                                 await asyncio.sleep(config.delay_between_entries)
 
-                    async with BrowserManager(headless=config.headless) as bm:
+                    async with BrowserManager(headless=_run_headless) as bm:
                         tasks = [
                             _enter_one(i + 1, sw)
                             for i, sw in enumerate(pending)
@@ -790,6 +799,13 @@ class SweepstakeGenieApp(ctk.CTk):
                 )
 
                 concurrency = getattr(config, 'concurrency', 3)
+                _manual_captcha = getattr(config, 'manual_captcha', False)
+                _manual_timeout = getattr(config, 'manual_captcha_timeout', 180.0)
+                _run_headless = config.headless
+                if _manual_captcha:
+                    # Manual mode: one visible window so CAPTCHAs can be solved by hand
+                    concurrency = 1
+                    _run_headless = False
 
                 async def _run_daily() -> None:
                     semaphore = asyncio.Semaphore(concurrency)
@@ -805,7 +821,9 @@ class SweepstakeGenieApp(ctk.CTk):
                                 page = await bm.new_page()
                                 result = await enter_sweepstake(
                                     page, url, config.profile,
-                                    captcha_solver=captcha_solver
+                                    captcha_solver=captcha_solver,
+                                    manual_captcha=_manual_captcha,
+                                    manual_captcha_timeout=_manual_timeout,
                                 )
                                 status = result["status"]
                                 if status == "entered":
@@ -862,7 +880,7 @@ class SweepstakeGenieApp(ctk.CTk):
                             if config.delay_between_entries > 0:
                                 await asyncio.sleep(config.delay_between_entries)
 
-                    async with BrowserManager(headless=config.headless) as bm:
+                    async with BrowserManager(headless=_run_headless) as bm:
                         tasks = [
                             _enter_one_daily(i + 1, sw)
                             for i, sw in enumerate(pending)
@@ -1289,6 +1307,20 @@ class SweepstakeGenieApp(ctk.CTk):
         self._captcha_api_key_var.grid(row=row, column=1, sticky="w", padx=(0, 10), pady=8)
         row += 1
 
+        # Manual CAPTCHA mode
+        ctk.CTkLabel(parent, text="Manual CAPTCHA:", anchor="e", width=200).grid(
+            row=row, column=0, sticky="e", padx=(10, 4), pady=8
+        )
+        self._manual_captcha_var = ctk.BooleanVar(value=False)
+        self._manual_captcha_cb = ctk.CTkCheckBox(
+            parent,
+            text="Pause and let me solve CAPTCHAs in a visible window "
+                 "(forces 1 worker, no headless)",
+            variable=self._manual_captcha_var,
+        )
+        self._manual_captcha_cb.grid(row=row, column=1, sticky="w", padx=(0, 10), pady=8)
+        row += 1
+
         # Balance check
         ctk.CTkLabel(parent, text="", width=200).grid(
             row=row, column=0, sticky="e", padx=(10, 4), pady=4
@@ -1335,6 +1367,8 @@ class SweepstakeGenieApp(ctk.CTk):
             "database": self._db_path_var.get() or DEFAULT_DB,
             "captcha_service": self._captcha_service_var.get(),
             "captcha_api_key": self._captcha_api_key_var.get(),
+            "manual_captcha": bool(self._manual_captcha_var.get()),
+            "manual_captcha_timeout": 180,
         }
 
     def _sync_settings_from_dict(self, settings: dict[str, Any]) -> None:
@@ -1361,6 +1395,8 @@ class SweepstakeGenieApp(ctk.CTk):
             if "captcha_api_key" in settings:
                 self._captcha_api_key_var.delete(0, "end")
                 self._captcha_api_key_var.insert(0, str(settings["captcha_api_key"]))
+            if "manual_captcha" in settings:
+                self._manual_captcha_var.set(bool(settings["manual_captcha"]))
         except Exception:
             pass  # widgets may not exist yet on first call
 

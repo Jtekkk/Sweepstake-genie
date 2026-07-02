@@ -87,7 +87,11 @@ async def _enter_worker(
         page  = None
         try:
             page = await bm.new_page()
-            result = await enter_sweepstake(page, url, config.profile, captcha_solver)
+            result = await enter_sweepstake(
+                page, url, config.profile, captcha_solver,
+                manual_captcha=config.manual_captcha,
+                manual_captcha_timeout=config.manual_captcha_timeout,
+            )
             status = result["status"]
             if status == "entered":
                 db.mark_entered(url)
@@ -138,9 +142,13 @@ async def _run_enter_async(config: Config, db: Database) -> None:
         api_key=config.captcha_api_key,
     )
 
+    # In manual mode the user solves CAPTCHAs by hand, so previously-skipped
+    # CAPTCHA entries become retryable too.
+    include_captcha = captcha_solver.enabled or config.manual_captcha
+
     pending   = db.get_pending()
     daily     = db.get_due_for_reentry()
-    retryable = db.get_retryable(include_captcha=captcha_solver.enabled)
+    retryable = db.get_retryable(include_captcha=include_captcha)
 
     seen_urls: set[str] = {sw["url"] for sw in pending}
     for e in daily:
@@ -163,13 +171,27 @@ async def _run_enter_async(config: Config, db: Database) -> None:
         all_entries = all_entries[:limit]
 
     total       = len(all_entries)
+
+    # Manual CAPTCHA mode: force a single visible browser so the user can solve
+    # one CAPTCHA at a time. Running headless or in parallel would make manual
+    # solving impossible.
+    headless    = config.headless
     concurrency = config.concurrency
+    if config.manual_captcha:
+        headless = False
+        concurrency = 1
+        console.print(
+            "[bold yellow]Manual CAPTCHA mode:[/bold yellow] browser is visible and "
+            "workers are limited to 1. Solve each CAPTCHA in the window when prompted "
+            f"(waiting up to {int(config.manual_captcha_timeout)}s each)."
+        )
+
     semaphore   = asyncio.Semaphore(concurrency)
     stop_event  = asyncio.Event()
 
     console.print(f"[bold]Entering {total} sweepstakes ({concurrency} parallel workers)…[/bold]")
 
-    async with BrowserManager(headless=config.headless) as bm:
+    async with BrowserManager(headless=headless) as bm:
         tasks = [
             _enter_worker(bm, sw, i + 1, total, config, db, captcha_solver,
                           semaphore, stop_event)
@@ -230,9 +252,20 @@ async def _enter_one(url: str, config: Config, db: Database) -> None:
         service=config.captcha_service,
         api_key=config.captcha_api_key,
     )
-    async with BrowserManager(headless=config.headless) as bm:
+    # Manual CAPTCHA mode needs a visible window so the user can solve it.
+    headless = config.headless and not config.manual_captcha
+    if config.manual_captcha:
+        console.print(
+            "[bold yellow]Manual CAPTCHA mode:[/bold yellow] solve the CAPTCHA in "
+            "the browser window when prompted."
+        )
+    async with BrowserManager(headless=headless) as bm:
         page = await bm.new_page()
-        result = await enter_sweepstake(page, url, config.profile, captcha_solver)
+        result = await enter_sweepstake(
+            page, url, config.profile, captcha_solver,
+            manual_captcha=config.manual_captcha,
+            manual_captcha_timeout=config.manual_captcha_timeout,
+        )
 
     status = result["status"]
     icon   = _status_icon(status)

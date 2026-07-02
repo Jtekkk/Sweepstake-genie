@@ -24,3 +24,5 @@ settings:
   database: "sweepstakes.db"
   captcha_service: "none"  # options: none, 2captcha, capsolver
   captcha_api_key: ""      # your API key from the service above
+  manual_captcha: false    # solve CAPTCHAs yourself in a visible browser window
+  manual_captcha_timeout: 180  # seconds to wait for you to solve each CAPTCHA

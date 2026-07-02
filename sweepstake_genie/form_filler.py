@@ -527,6 +527,47 @@ async def _inject_captcha_token(page: Page, captcha_type: str, token: str) -> No
     await asyncio.sleep(0.5)
 
 
+async def _is_captcha_solved(page: Page) -> bool:
+    """Return True if a CAPTCHA response token is now present in the page."""
+    try:
+        return bool(await page.evaluate("""
+            () => {
+                const sels = [
+                    '#g-recaptcha-response',
+                    'textarea[name="g-recaptcha-response"]',
+                    'textarea[name="h-captcha-response"]',
+                    'input[name="cf-turnstile-response"]',
+                ];
+                for (const s of sels) {
+                    const els = document.querySelectorAll(s);
+                    for (const el of els) {
+                        if (el && el.value && el.value.trim().length > 0) return true;
+                    }
+                }
+                return false;
+            }
+        """))
+    except Exception:
+        return False
+
+
+async def _wait_for_manual_captcha(page: Page, timeout: float = 180.0) -> bool:
+    """
+    Pause and wait for a human to solve the CAPTCHA in a visible browser window.
+
+    Polls for a response token every couple of seconds and returns True as soon
+    as one appears, or False if *timeout* seconds elapse first.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if await _is_captcha_solved(page):
+            return True
+        await asyncio.sleep(2.0)
+    # One last check in case it was solved right at the deadline
+    return await _is_captcha_solved(page)
+
+
 async def _solve_recaptcha_audio(page: Page) -> bool:
     """Solve reCAPTCHA v2 via the audio challenge + Google Speech-to-Text (free).
 
@@ -1953,7 +1994,14 @@ async def _try_click_through(page: Page) -> bool:
 
 # ── Main entry function ───────────────────────────────────────────────────────
 
-async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=None) -> dict[str, Any]:
+async def fill_and_submit(
+    page: Page,
+    profile: dict[str, str],
+    captcha_solver=None,
+    *,
+    manual_captcha: bool = False,
+    manual_captcha_timeout: float = 180.0,
+) -> dict[str, Any]:
     """
     Attempt to fill and submit the entry form on the current page.
 
@@ -1965,6 +2013,11 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
         User profile dict from config (keys match _FIELD_SELECTORS above).
     captcha_solver:
         Optional CaptchaSolver instance for auto-solving CAPTCHAs.
+    manual_captcha:
+        When True, pause on CAPTCHA and wait for a human to solve it in the
+        (visible) browser window instead of skipping or auto-solving.
+    manual_captcha_timeout:
+        How long, in seconds, to wait for the human to solve the CAPTCHA.
 
     Returns
     -------
@@ -2119,32 +2172,45 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
     if captcha_type:
         solved = False
 
-        # Always try the free audio challenge first for reCAPTCHA
-        if captcha_type == "recaptcha":
-            solved = await _solve_recaptcha_audio(page)
-
-        # Fall back to configured external service if audio didn't work
-        if not solved and captcha_solver and captcha_solver.enabled and sitekey:
-            logger.info(
-                "Solving %s via %s (sitekey: %s…)",
-                captcha_type, captcha_solver.service, (sitekey or "")[:8],
+        if manual_captcha:
+            # Human-in-the-loop: pause and let the user solve it in the browser.
+            logger.warning(
+                "🔒 CAPTCHA detected on %s — please solve it in the browser "
+                "window. Waiting up to %ds…",
+                page.url, int(manual_captcha_timeout),
             )
-            if captcha_type == "hcaptcha":
-                token = await asyncio.get_running_loop().run_in_executor(
-                    None, captcha_solver.solve_hcaptcha, sitekey, page.url
-                )
+            solved = await _wait_for_manual_captcha(page, manual_captcha_timeout)
+            if solved:
+                logger.warning("✓ CAPTCHA solved — continuing entry.")
             else:
-                token = await asyncio.get_running_loop().run_in_executor(
-                    None, captcha_solver.solve_recaptcha, sitekey, page.url
-                )
-            if token:
-                await _inject_captcha_token(page, captcha_type, token)
-                solved = True
-            else:
-                return {"status": "captcha", "detail": "solver returned no token"}
+                return {"status": "captcha", "detail": "manual solve timed out"}
+        else:
+            # Always try the free audio challenge first for reCAPTCHA
+            if captcha_type == "recaptcha":
+                solved = await _solve_recaptcha_audio(page)
 
-        if not solved:
-            return {"status": "captcha"}
+            # Fall back to configured external service if audio didn't work
+            if not solved and captcha_solver and captcha_solver.enabled and sitekey:
+                logger.info(
+                    "Solving %s via %s (sitekey: %s…)",
+                    captcha_type, captcha_solver.service, (sitekey or "")[:8],
+                )
+                if captcha_type == "hcaptcha":
+                    token = await asyncio.get_running_loop().run_in_executor(
+                        None, captcha_solver.solve_hcaptcha, sitekey, page.url
+                    )
+                else:
+                    token = await asyncio.get_running_loop().run_in_executor(
+                        None, captcha_solver.solve_recaptcha, sitekey, page.url
+                    )
+                if token:
+                    await _inject_captcha_token(page, captcha_type, token)
+                    solved = True
+                else:
+                    return {"status": "captcha", "detail": "solver returned no token"}
+
+            if not solved:
+                return {"status": "captcha"}
 
     # ── Multi-step form loop (max 8 steps) ────────────────────────────────────
     total_fields_filled = 0
@@ -2237,7 +2303,15 @@ async def fill_and_submit(page: Page, profile: dict[str, str], captcha_solver=No
     return {"status": "entered"}
 
 
-async def enter_sweepstake(page: Page, url: str, profile: dict[str, str], captcha_solver=None) -> dict[str, Any]:
+async def enter_sweepstake(
+    page: Page,
+    url: str,
+    profile: dict[str, str],
+    captcha_solver=None,
+    *,
+    manual_captcha: bool = False,
+    manual_captcha_timeout: float = 180.0,
+) -> dict[str, Any]:
     """
     Navigate to *url* and attempt entry.  Wraps :func:`fill_and_submit` with
     navigation error handling and a single automatic retry on transient errors.
@@ -2251,7 +2325,11 @@ async def enter_sweepstake(page: Page, url: str, profile: dict[str, str], captch
                 await page.reload(wait_until="domcontentloaded", timeout=20_000)
                 await asyncio.sleep(random.uniform(1.5, 3.0))
 
-            result = await fill_and_submit(page, profile, captcha_solver=captcha_solver)
+            result = await fill_and_submit(
+                page, profile, captcha_solver=captcha_solver,
+                manual_captcha=manual_captcha,
+                manual_captcha_timeout=manual_captcha_timeout,
+            )
 
             # Annotate successful entries with daily re-entry flag
             if result["status"] == "entered" and "allows_daily" not in result:

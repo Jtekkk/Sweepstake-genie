@@ -826,11 +826,51 @@ async def test_form_filler_no_crash_on_complex_page():
         f"Unexpected status: {result['status']}"
 
 
+async def test_manual_captcha_detects_solved_token():
+    """_is_captcha_solved should see a filled g-recaptcha-response textarea."""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import _is_captcha_solved, _wait_for_manual_captcha
+    html = """<html><body>
+    <textarea name="g-recaptcha-response"></textarea>
+    </body></html>"""
+    async with BrowserManager(headless=True) as bm:
+        page = await bm.new_page()
+        await page.set_content(html)
+        # Unsolved: textarea is empty
+        assert await _is_captcha_solved(page) is False
+        # Fill it as a human solve would, then it should read as solved
+        await page.eval_on_selector(
+            'textarea[name="g-recaptcha-response"]',
+            "el => el.value = 'FAKE_TOKEN_VALUE'",
+        )
+        assert await _is_captcha_solved(page) is True
+        # wait helper should return True quickly since it's already solved
+        assert await _wait_for_manual_captcha(page, timeout=5) is True
+        await page.close()
+
+
+async def test_manual_captcha_times_out():
+    """_wait_for_manual_captcha should return False if never solved."""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import _wait_for_manual_captcha
+    html = """<html><body>
+    <textarea name="g-recaptcha-response"></textarea>
+    </body></html>"""
+    async with BrowserManager(headless=True) as bm:
+        page = await bm.new_page()
+        await page.set_content(html)
+        # Short timeout; token never filled -> should time out to False
+        assert await _wait_for_manual_captcha(page, timeout=1) is False
+        await page.close()
+
+
 for fn in [
     test_form_filler_about_blank,
     test_form_filler_expired_page,
     test_platform_handlers_are_coroutines,
     test_form_filler_no_crash_on_complex_page,
+    test_manual_captcha_detects_solved_token,
+    test_manual_captcha_times_out,
 ]:
     run_test(f"form_filler: {fn.__name__.replace('test_form_filler_', '').replace('test_', '')}", fn)
 

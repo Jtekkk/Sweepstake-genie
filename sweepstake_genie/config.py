@@ -26,6 +26,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "database": "sweepstakes.db",
     "captcha_service": "none",
     "captcha_api_key": "",
+    "manual_captcha": False,
+    "manual_captcha_timeout": 180,
 }
 
 
@@ -134,6 +136,14 @@ class Config:
     @property
     def captcha_api_key(self) -> str:
         return str(self.settings.get("captcha_api_key", ""))
+
+    @property
+    def manual_captcha(self) -> bool:
+        return bool(self.settings.get("manual_captcha", False))
+
+    @property
+    def manual_captcha_timeout(self) -> float:
+        return float(self.settings.get("manual_captcha_timeout", 180))
 
     # ── Display ───────────────────────────────────────────────────────────
 
