@@ -26,6 +26,78 @@ from playwright.async_api import (
 
 if TYPE_CHECKING:
     from types import TracebackType
+    from typing import Callable
+
+
+# ── First-run browser bootstrap ───────────────────────────────────────────────
+
+def ensure_browser_installed(
+    progress_cb: "Callable[[str], None] | None" = None,
+) -> bool:
+    """
+    Make sure Playwright's Chromium is present, downloading it on first run.
+
+    A frozen ``.exe`` ships the Playwright driver but not the ~150 MB Chromium
+    binary, so the very first launch on a new machine has to fetch it into the
+    user's Playwright cache. Subsequent launches find it and return instantly.
+
+    Returns True if a usable browser is available (already installed or freshly
+    downloaded), False if the install could not be completed.
+    """
+    import os
+    import subprocess
+
+    def _browser_present() -> bool:
+        try:
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as p:
+                exe = p.chromium.executable_path
+            return bool(exe and os.path.exists(exe))
+        except Exception:
+            # executable_path raises when the browser isn't installed yet
+            return False
+
+    if _browser_present():
+        return True
+
+    if progress_cb:
+        progress_cb("Setting up browser (first run, ~150 MB download)…")
+    logger.info("Chromium not found — installing it for the first time…")
+
+    env = dict(os.environ)
+    try:
+        if getattr(sys, "frozen", False):
+            # In a frozen exe we must invoke Playwright's bundled Node driver
+            # directly — `python -m playwright` isn't available.
+            from playwright._impl._driver import (
+                compute_driver_executable,
+                get_driver_env,
+            )
+            env = get_driver_env()
+            drv = compute_driver_executable()
+            drv = list(drv) if isinstance(drv, (list, tuple)) else [drv]
+            cmd = drv + ["install", "chromium"]
+        else:
+            cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+
+        subprocess.run(
+            cmd,
+            env=env,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+    except Exception as exc:
+        logger.error("Automatic browser install failed: %s", exc)
+        if progress_cb:
+            progress_cb(f"Browser setup failed: {exc}")
+        return False
+
+    ok = _browser_present()
+    if ok and progress_cb:
+        progress_cb("Browser ready.")
+    return ok
+
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 

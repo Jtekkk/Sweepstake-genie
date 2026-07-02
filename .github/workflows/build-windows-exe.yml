@@ -1,0 +1,58 @@
+name: Build Windows EXE
+
+# Produces a standalone SweepstakeGenie.exe on a Windows runner and uploads it
+# as a downloadable artifact. PyInstaller cannot cross-compile, so a Windows
+# executable can only be built on Windows — hence this CI job.
+
+on:
+  workflow_dispatch:          # lets you build on demand from the Actions tab
+  push:
+    branches:
+      - claude/sweepstakes-entry-automation-j8z245
+    paths:
+      - '**/*.py'
+      - 'sweepstake_genie_gui.spec'
+      - 'requirements.txt'
+      - 'runtime_hooks/**'
+      - '.github/workflows/build-windows-exe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      # Chromium is NOT bundled — the app downloads it into the user's
+      # Playwright cache on first run (see ensure_browser_installed). This
+      # keeps the exe small; we only need the Playwright *package* present so
+      # the spec can collect its Node driver.
+
+      - name: Build EXE
+        run: pyinstaller sweepstake_genie_gui.spec --clean --noconfirm
+
+      - name: Show build output
+        run: dir dist
+
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SweepstakeGenie-windows-exe
+          path: dist/SweepstakeGenie.exe
+          if-no-files-found: error
+          retention-days: 30

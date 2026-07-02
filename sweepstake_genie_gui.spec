@@ -36,6 +36,11 @@ a = Analysis(
         'lxml',
         'lxml.etree',
         'lxml._elementpath',
+        # Audio CAPTCHA solving (optional at runtime, bundled so it can work)
+        'speech_recognition',
+        'pydub',
+        # Concurrency used by the parallel scraper
+        'concurrent.futures',
     ],
     hookspath=[],
     hooksconfig={},

@@ -546,7 +546,7 @@ class SweepstakeGenieApp(ctk.CTk):
                 from sweepstake_genie.config import Config
                 from sweepstake_genie.database import Database
                 from sweepstake_genie.scraper import discover_all, list_sources
-                from sweepstake_genie.browser import BrowserManager
+                from sweepstake_genie.browser import BrowserManager, ensure_browser_installed
                 from sweepstake_genie.form_filler import enter_sweepstake
 
                 # Load config
@@ -719,6 +719,16 @@ class SweepstakeGenieApp(ctk.CTk):
                             if isinstance(_r, BaseException):
                                 logging.getLogger(__name__).error("Worker task failed: %s", _r)
 
+                if not ensure_browser_installed(
+                    progress_cb=lambda m: self._log_queue.put(f"[{_ts()}] {m}")
+                ):
+                    self._log_queue.put(
+                        f"[{_ts()}] ERROR: could not set up the browser. "
+                        "Check your internet connection and try again."
+                    )
+                    self._log_queue.put(("done", "Error"))
+                    return
+
                 asyncio.run(_run_entries())
 
                 self._log_queue.put(
@@ -754,7 +764,7 @@ class SweepstakeGenieApp(ctk.CTk):
             try:
                 from sweepstake_genie.config import Config
                 from sweepstake_genie.database import Database
-                from sweepstake_genie.browser import BrowserManager
+                from sweepstake_genie.browser import BrowserManager, ensure_browser_installed
                 from sweepstake_genie.form_filler import enter_sweepstake
 
                 try:
@@ -889,6 +899,16 @@ class SweepstakeGenieApp(ctk.CTk):
                         for _r in _results:
                             if isinstance(_r, BaseException):
                                 logging.getLogger(__name__).error("Worker task failed: %s", _r)
+
+                if not ensure_browser_installed(
+                    progress_cb=lambda m: self._log_queue.put(f"[{_ts()}] {m}")
+                ):
+                    self._log_queue.put(
+                        f"[{_ts()}] ERROR: could not set up the browser. "
+                        "Check your internet connection and try again."
+                    )
+                    self._log_queue.put(("done", "Error"))
+                    return
 
                 asyncio.run(_run_daily())
 

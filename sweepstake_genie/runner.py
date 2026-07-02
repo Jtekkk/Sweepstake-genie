@@ -12,7 +12,7 @@ from rich.console import Console
 from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
-from .browser import BrowserManager
+from .browser import BrowserManager, ensure_browser_installed
 from .captcha_solver import CaptchaSolver
 from .config import Config
 from .database import Database
@@ -239,8 +239,22 @@ def _warn_if_captcha_unusable(config: Config) -> None:
         )
 
 
+def _ensure_browser_ready() -> bool:
+    """Ensure Chromium is installed, printing status. Returns False on failure."""
+    if not ensure_browser_installed(progress_cb=lambda msg: console.print(f"[dim]{msg}[/dim]")):
+        console.print(
+            "[red]Could not set up the browser. Ensure you have an internet "
+            "connection, then try again. You can also run "
+            "'playwright install chromium' manually.[/red]"
+        )
+        return False
+    return True
+
+
 def run_enter(config: Config, db: Database) -> None:
     """Entry point for the entry phase — runs parallel workers."""
+    if not _ensure_browser_ready():
+        return
     _warn_if_captcha_unusable(config)
     asyncio.run(_run_enter_async(config, db))
 
@@ -290,6 +304,8 @@ async def _enter_one(url: str, config: Config, db: Database) -> None:
 
 def run_enter_url(url: str, config: Config, db: Database) -> None:
     """Enter a single sweepstake URL."""
+    if not _ensure_browser_ready():
+        return
     if not db.url_exists(url):
         db.add_sweepstake(url, url, "manual")
     asyncio.run(_enter_one(url, config, db))
