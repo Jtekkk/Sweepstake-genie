@@ -17,7 +17,7 @@ on:
       - '.github/workflows/build-windows-exe.yml'
 
 permissions:
-  contents: read
+  contents: write   # needed to publish the exe to a GitHub Release
 
 jobs:
   build-windows:
@@ -56,3 +56,24 @@ jobs:
           path: dist/SweepstakeGenie.exe
           if-no-files-found: error
           retention-days: 30
+
+      # Publish to a rolling "latest" GitHub Release so there is a permanent,
+      # bookmarkable download link that never expires:
+      #   https://github.com/Jtekkk/Sweepstake-genie/releases/latest/download/SweepstakeGenie.exe
+      - name: Publish to GitHub Release (rolling "latest")
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: SweepstakeGenie (latest build)
+          body: |
+            Standalone Windows build of Sweepstake Genie.
+
+            **Download:** `SweepstakeGenie.exe` below.
+
+            First launch downloads its browser (~150 MB, one time) and then runs.
+            Manual CAPTCHA mode opens a window only for pages that actually show a
+            CAPTCHA — everything else runs in the background.
+
+            _This release is rebuilt automatically from the latest commit._
+          files: dist/SweepstakeGenie.exe
+          make_latest: true
