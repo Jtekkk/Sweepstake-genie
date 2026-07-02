@@ -864,6 +864,79 @@ async def test_manual_captcha_times_out():
         await page.close()
 
 
+async def test_detect_captcha_interactive_v2():
+    """A visible, normal-size reCAPTCHA container is reported as interactive."""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import _detect_captcha
+    html = """<html><body>
+    <div class="g-recaptcha" data-sitekey="ABC123"
+         style="width:304px;height:78px;background:#eee"></div>
+    </body></html>"""
+    async with BrowserManager(headless=True) as bm:
+        page = await bm.new_page()
+        await page.set_content(html)
+        ctype, sitekey, interactive = await _detect_captcha(page)
+        await page.close()
+    assert ctype == "recaptcha", f"Expected recaptcha, got {ctype}"
+    assert sitekey == "ABC123", f"Expected sitekey ABC123, got {sitekey}"
+    assert interactive is True, "Normal-size v2 widget should be interactive"
+
+
+async def test_detect_captcha_invisible_v3_not_interactive():
+    """An invisible reCAPTCHA v3 (data-size=invisible) is NOT interactive."""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import _detect_captcha
+    html = """<html><body>
+    <div class="g-recaptcha" data-sitekey="V3KEY" data-size="invisible"></div>
+    <div class="grecaptcha-badge" style="width:256px;height:60px"></div>
+    </body></html>"""
+    async with BrowserManager(headless=True) as bm:
+        page = await bm.new_page()
+        await page.set_content(html)
+        ctype, sitekey, interactive = await _detect_captcha(page)
+        await page.close()
+    assert ctype == "recaptcha", f"Expected recaptcha, got {ctype}"
+    assert interactive is False, "Invisible v3 must not be interactive"
+
+
+async def test_detect_captcha_none_on_plain_page():
+    """A plain entry page with no CAPTCHA returns (None, None, False)."""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import _detect_captcha
+    html = """<html><body>
+    <form><input name="email" placeholder="Email"><button>Enter</button></form>
+    </body></html>"""
+    async with BrowserManager(headless=True) as bm:
+        page = await bm.new_page()
+        await page.set_content(html)
+        ctype, sitekey, interactive = await _detect_captcha(page)
+        await page.close()
+    assert ctype is None, f"Plain page should have no captcha, got {ctype}"
+    assert interactive is False
+
+
+async def test_manual_mode_skips_invisible_v3():
+    """Manual mode must NOT hang on a page that only has invisible v3."""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import fill_and_submit
+    html = """<html><body>
+    <div class="grecaptcha-badge" style="width:256px;height:60px"></div>
+    <p>Some article content, no entry form here.</p>
+    </body></html>"""
+    async with BrowserManager(headless=True) as bm:
+        page = await bm.new_page()
+        await page.set_content(html)
+        # timeout of 2s: if the code incorrectly waited for a manual solve it
+        # would block ~2s and then return captcha; instead it should fall
+        # through to no_form quickly.
+        result = await fill_and_submit(
+            page, _PROFILE, manual_captcha=True, manual_captcha_timeout=2
+        )
+        await page.close()
+    assert result["status"] in ("no_form", "entered", "error"), \
+        f"Manual mode should not report captcha for invisible v3, got {result}"
+
+
 for fn in [
     test_form_filler_about_blank,
     test_form_filler_expired_page,
@@ -871,6 +944,10 @@ for fn in [
     test_form_filler_no_crash_on_complex_page,
     test_manual_captcha_detects_solved_token,
     test_manual_captcha_times_out,
+    test_detect_captcha_interactive_v2,
+    test_detect_captcha_invisible_v3_not_interactive,
+    test_detect_captcha_none_on_plain_page,
+    test_manual_mode_skips_invisible_v3,
 ]:
     run_test(f"form_filler: {fn.__name__.replace('test_form_filler_', '').replace('test_', '')}", fn)
 

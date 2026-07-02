@@ -421,61 +421,118 @@ async def _has_captcha(page: Page) -> bool:
     return False
 
 
-async def _detect_captcha(page: Page) -> tuple[str | None, str | None]:
-    """
-    Detect visible CAPTCHA and return (type, sitekey).
-    type is 'recaptcha', 'hcaptcha', or None.
-    sitekey is the data-sitekey value or None.
-    """
-    # reCAPTCHA
-    for sel in [".g-recaptcha", "div[data-sitekey]", "iframe[src*='recaptcha']"]:
-        try:
-            el = await page.query_selector(sel)
-            if el and await el.is_visible():
-                sitekey = await el.get_attribute("data-sitekey")
-                if not sitekey:
-                    # Try to extract from iframe src
-                    src = await el.get_attribute("src") or ""
-                    if "k=" in src:
-                        sitekey = src.split("k=")[1].split("&")[0]
-                return "recaptcha", sitekey
-        except Exception:
-            pass
-
-    # Also check for recaptcha via JavaScript
+async def _element_box(page: Page, selector: str):
+    """Return (element, bounding_box) for the first match, or (None, None)."""
     try:
-        sitekey = await page.evaluate("""
+        el = await page.query_selector(selector)
+        if not el:
+            return None, None
+        box = await el.bounding_box()
+        return el, box
+    except Exception:
+        return None, None
+
+
+def _is_real_box(box, min_w: int = 40, min_h: int = 40) -> bool:
+    """True if a bounding box is actually rendered at a usable size."""
+    return bool(box and box.get("width", 0) >= min_w and box.get("height", 0) >= min_h)
+
+
+async def _detect_captcha(page: Page) -> tuple[str | None, str | None, bool]:
+    """
+    Detect a CAPTCHA and return (type, sitekey, interactive).
+
+    - type: 'recaptcha', 'hcaptcha', or None
+    - sitekey: the data-sitekey value (or extracted from an iframe src), or None
+    - interactive: True only when a *user-solvable* challenge widget is actually
+      rendered on the page — a reCAPTCHA v2 checkbox, an hCaptcha checkbox, or an
+      interactive Turnstile widget. It is False for invisible / score-based
+      reCAPTCHA v3 (the little "protected by reCAPTCHA" badge), which a human
+      cannot click to solve. Manual-solve mode uses this to avoid pausing on
+      ordinary entry pages that merely carry an invisible v3 badge.
+    """
+    # ── reCAPTCHA ─────────────────────────────────────────────────────────────
+    recaptcha_present = False
+    recaptcha_interactive = False
+    recaptcha_sitekey = None
+
+    # sitekey (present for both v2 and v3)
+    try:
+        recaptcha_sitekey = await page.evaluate("""
             () => {
-                const el = document.querySelector('.g-recaptcha, [data-sitekey]');
+                const el = document.querySelector('.g-recaptcha[data-sitekey], [data-sitekey]');
                 return el ? el.getAttribute('data-sitekey') : null;
             }
         """)
-        if sitekey:
-            return "recaptcha", sitekey
     except Exception:
-        pass
+        recaptcha_sitekey = None
 
-    # hCaptcha
-    for sel in [".h-captcha", "[data-hcaptcha-widget-id]", "iframe[src*='hcaptcha']"]:
-        try:
-            el = await page.query_selector(sel)
-            if el and await el.is_visible():
-                sitekey = await el.get_attribute("data-sitekey")
-                return "hcaptcha", sitekey
-        except Exception:
-            pass
+    # A rendered anchor iframe means a clickable v2 checkbox is on the page.
+    for sel in ('iframe[src*="recaptcha"][src*="anchor"]',
+                'iframe[title="reCAPTCHA"]'):
+        el, box = await _element_box(page, sel)
+        if el is not None:
+            recaptcha_present = True
+            if _is_real_box(box, 20, 20):
+                recaptcha_interactive = True
+                if not recaptcha_sitekey:
+                    src = await el.get_attribute("src") or ""
+                    if "k=" in src:
+                        recaptcha_sitekey = src.split("k=")[1].split("&")[0]
+            break
 
-    # Cloudflare Turnstile
-    for sel in [".cf-turnstile", "iframe[src*='challenges.cloudflare']"]:
-        try:
-            el = await page.query_selector(sel)
-            if el and await el.is_visible():
-                sitekey = await el.get_attribute("data-sitekey")
-                return "recaptcha", sitekey  # treat as recaptcha-compatible
-        except Exception:
-            pass
+    # A visible, non-invisible .g-recaptcha container is also an interactive v2.
+    if not recaptcha_interactive:
+        el, box = await _element_box(page, ".g-recaptcha")
+        if el is not None:
+            recaptcha_present = True
+            size = (await el.get_attribute("data-size") or "").lower()
+            if size != "invisible" and _is_real_box(box):
+                recaptcha_interactive = True
+            if not recaptcha_sitekey:
+                recaptcha_sitekey = await el.get_attribute("data-sitekey")
 
-    return None, None
+    # The floating v3 badge counts as "present but not interactive".
+    if not recaptcha_present:
+        badge, _ = await _element_box(page, ".grecaptcha-badge")
+        if badge is not None or recaptcha_sitekey:
+            recaptcha_present = True
+
+    if recaptcha_present:
+        return "recaptcha", recaptcha_sitekey, recaptcha_interactive
+
+    # ── hCaptcha ──────────────────────────────────────────────────────────────
+    hcaptcha_sitekey = None
+    try:
+        hcaptcha_sitekey = await page.evaluate("""
+            () => {
+                const el = document.querySelector('.h-captcha[data-sitekey], [data-hcaptcha-sitekey]');
+                return el ? (el.getAttribute('data-sitekey')
+                            || el.getAttribute('data-hcaptcha-sitekey')) : null;
+            }
+        """)
+    except Exception:
+        hcaptcha_sitekey = None
+
+    for sel in ('iframe[src*="hcaptcha"][src*="checkbox"]',
+                'iframe[src*="hcaptcha.com"]',
+                '.h-captcha'):
+        el, box = await _element_box(page, sel)
+        if el is not None:
+            size = (await el.get_attribute("data-size") or "").lower()
+            interactive = size != "invisible" and _is_real_box(box, 20, 20)
+            if not hcaptcha_sitekey:
+                hcaptcha_sitekey = await el.get_attribute("data-sitekey")
+            return "hcaptcha", hcaptcha_sitekey, interactive
+
+    # ── Cloudflare Turnstile (treated as reCAPTCHA-compatible) ────────────────
+    for sel in ('.cf-turnstile', 'iframe[src*="challenges.cloudflare"]'):
+        el, box = await _element_box(page, sel)
+        if el is not None:
+            sitekey = await el.get_attribute("data-sitekey")
+            return "recaptcha", sitekey, _is_real_box(box, 20, 20)
+
+    return None, None, False
 
 
 async def _inject_captcha_token(page: Page, captcha_type: str, token: str) -> None:
@@ -2168,22 +2225,33 @@ async def fill_and_submit(
         return {"status": "expired"}
 
     # ── CAPTCHA detection & solving ───────────────────────────────────────────
-    captcha_type, sitekey = await _detect_captcha(page)
+    captcha_type, sitekey, captcha_interactive = await _detect_captcha(page)
     if captcha_type:
         solved = False
 
         if manual_captcha:
-            # Human-in-the-loop: pause and let the user solve it in the browser.
-            logger.warning(
-                "🔒 CAPTCHA detected on %s — please solve it in the browser "
-                "window. Waiting up to %ds…",
-                page.url, int(manual_captcha_timeout),
-            )
-            solved = await _wait_for_manual_captcha(page, manual_captcha_timeout)
-            if solved:
-                logger.warning("✓ CAPTCHA solved — continuing entry.")
+            if not captcha_interactive:
+                # Invisible / score-based CAPTCHA (e.g. reCAPTCHA v3): there is
+                # nothing for a human to click. Don't pause the run — just carry
+                # on and let the form submit; the token is issued in the
+                # background. This keeps manual mode from stopping on ordinary
+                # entry pages that only carry an invisible v3 badge.
+                logger.info(
+                    "Non-interactive CAPTCHA (likely reCAPTCHA v3) on %s — "
+                    "no manual step needed, continuing.", page.url,
+                )
             else:
-                return {"status": "captcha", "detail": "manual solve timed out"}
+                # Human-in-the-loop: pause and let the user solve it in the browser.
+                logger.warning(
+                    "🔒 CAPTCHA detected on %s — please solve it in the browser "
+                    "window. Waiting up to %ds…",
+                    page.url, int(manual_captcha_timeout),
+                )
+                solved = await _wait_for_manual_captcha(page, manual_captcha_timeout)
+                if solved:
+                    logger.warning("✓ CAPTCHA solved — continuing entry.")
+                else:
+                    return {"status": "captcha", "detail": "manual solve timed out"}
         else:
             # Always try the free audio challenge first for reCAPTCHA
             if captcha_type == "recaptcha":
