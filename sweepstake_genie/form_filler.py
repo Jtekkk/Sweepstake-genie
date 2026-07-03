@@ -395,6 +395,35 @@ async def _has_form_fields(page: Page) -> bool:
     return False
 
 
+async def _count_entry_fields(page: Page) -> int:
+    """
+    Count how many *distinct* recognised entry fields are visibly on the page.
+
+    A sweepstakes entry form asks for several things (name, address, city, zip,
+    phone, DOB, …). A blog's newsletter/comment box asks for one or two (usually
+    just email). Counting distinct recognised field types lets us tell a real
+    entry form apart from a newsletter signup that merely happens to carry a
+    reCAPTCHA — so manual mode doesn't stop you to solve newsletter CAPTCHAs.
+    """
+    # Fields that strongly indicate a real entry form (not a newsletter box).
+    strong_keys = (
+        "first_name", "last_name", "address1", "address2",
+        "city", "state", "zip", "phone", "dob_month", "dob_day",
+        "dob_year", "age",
+    )
+    count = 0
+    for key in strong_keys:
+        for sel in _FIELD_SELECTORS.get(key, []):
+            try:
+                el = await page.query_selector(sel)
+                if el and await el.is_visible():
+                    count += 1
+                    break
+            except Exception:
+                continue
+    return count
+
+
 async def _wait_for_form(page: Page) -> bool:
     """Wait up to 8 s for any visible form element. Returns True if found."""
     try:
@@ -2293,6 +2322,16 @@ async def fill_and_submit(
                     page.url,
                 )
                 return {"status": "needs_captcha"}
+            elif await _count_entry_fields(page) < 2:
+                # A CAPTCHA is showing, but the page has no real entry form — just
+                # a newsletter/comment box that happens to carry a reCAPTCHA (very
+                # common on sweepstakes *blogs*). Don't make the user solve it;
+                # skip the page instead of wasting their time.
+                logger.info(
+                    "CAPTCHA present but no real entry form on %s — looks like a "
+                    "newsletter/comment box; skipping.", page.url,
+                )
+                return {"status": "no_form"}
             else:
                 # Human-in-the-loop: pause and let the user solve it in the browser.
                 logger.warning(
@@ -2397,8 +2436,9 @@ async def fill_and_submit(
             if await _detect_success(page):
                 return {"status": "entered", "steps": step + 1}
             # Manual mode: a CAPTCHA often appears only AFTER clicking submit.
-            # If one showed up now, pause for the human, then submit again.
-            if manual_captcha and not defer_captcha:
+            # Only bother the user if we actually filled a real entry form (≥2
+            # fields) — otherwise it's a newsletter/comment CAPTCHA, not an entry.
+            if manual_captcha and not defer_captcha and (total_fields_filled >= 2):
                 ct2, _sk2, ci2 = await _detect_captcha_wait(page, timeout=4.0)
                 if ct2 and ci2 and not await _is_captcha_solved(page):
                     logger.warning(

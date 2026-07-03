@@ -124,6 +124,15 @@ _EXCLUDE_TITLE_PATTERNS = frozenset([
     "sweepstakes posts",   # category/tag page link
     "fake contest", "scam alert",
     "i win every",         # personal story/advice article
+    # Blog/article phrasings (seen polluting RSS feeds from sweeps blogs)
+    "comments",            # "0 Comments" / "3 Comments" comment-link titles
+    "convention", "paying taxes", "clean your",
+    "finding sweepstakes", "are changing", "with me",
+    "roboform", "in the wild", "voting contest",
+    "how sweepstakes", "still my", " scams",
+    "sweepstaking", "contesting",   # category names, not entries
+    "what really happens", "spring into", "master winning",
+    "with me for free",
 ])
 
 

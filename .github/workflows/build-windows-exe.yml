@@ -71,8 +71,9 @@ jobs:
             **Download:** `SweepstakeGenie.exe` below.
 
             First launch downloads its browser (~150 MB, one time) and then runs.
-            Manual CAPTCHA mode opens a window only for pages that actually show a
-            CAPTCHA — everything else runs in the background.
+            In Manual CAPTCHA mode a visible browser goes through your sweepstakes
+            one at a time and pauses on each real CAPTCHA so you can solve it.
+            Blog/newsletter pages (no real entry form) are skipped automatically.
 
             _This release is rebuilt automatically from the latest commit._
           files: dist/SweepstakeGenie.exe

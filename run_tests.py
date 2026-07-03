@@ -973,6 +973,54 @@ async def test_defer_captcha_ignores_invisible_v3():
         f"Invisible v3 must not be queued for manual solve, got {result}"
 
 
+async def test_manual_mode_skips_newsletter_captcha():
+    """Manual mode must NOT pause on a newsletter box (1 field) + CAPTCHA —
+    that's a blog page, not a sweepstakes entry. It should skip to no_form."""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import fill_and_submit
+    html = """<html><body>
+    <form>
+      <input type="email" name="email" placeholder="Email">
+      <div class="g-recaptcha" data-sitekey="X" style="width:304px;height:78px"></div>
+    </form>
+    </body></html>"""
+    async with BrowserManager(headless=True) as bm:
+        page = await bm.new_page()
+        await page.set_content(html)
+        result = await fill_and_submit(
+            page, _PROFILE, manual_captcha=True, manual_captcha_timeout=1
+        )
+        await page.close()
+    assert result["status"] == "no_form", \
+        f"Newsletter box + captcha should skip to no_form, got {result}"
+
+
+async def test_manual_mode_pauses_on_real_entry_form():
+    """Manual mode SHOULD pause on a real multi-field entry form + CAPTCHA."""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import fill_and_submit
+    html = """<html><body>
+    <form>
+      <input name="first_name" placeholder="First">
+      <input name="last_name" placeholder="Last">
+      <input name="city" placeholder="City">
+      <input type="email" name="email" placeholder="Email">
+      <div class="g-recaptcha" data-sitekey="X" style="width:304px;height:78px"></div>
+      <button type="submit">Enter</button>
+    </form>
+    </body></html>"""
+    async with BrowserManager(headless=True) as bm:
+        page = await bm.new_page()
+        await page.set_content(html)
+        # timeout=1: it should PAUSE (real form), time out unsolved -> captcha
+        result = await fill_and_submit(
+            page, _PROFILE, manual_captcha=True, manual_captcha_timeout=1
+        )
+        await page.close()
+    assert result["status"] == "captcha", \
+        f"Real entry form + captcha should pause (then time out), got {result}"
+
+
 async def test_manual_mode_skips_invisible_v3():
     """Manual mode must NOT hang on a page that only has invisible v3."""
     from sweepstake_genie.browser import BrowserManager
@@ -1006,6 +1054,8 @@ for fn in [
     test_detect_captcha_v2_zero_height_still_interactive,
     test_detect_captcha_invisible_v3_not_interactive,
     test_detect_captcha_none_on_plain_page,
+    test_manual_mode_skips_newsletter_captcha,
+    test_manual_mode_pauses_on_real_entry_form,
     test_manual_mode_skips_invisible_v3,
     test_defer_captcha_returns_needs_captcha,
     test_defer_captcha_ignores_invisible_v3,
