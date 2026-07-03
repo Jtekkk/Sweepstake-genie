@@ -424,6 +424,87 @@ async def _count_entry_fields(page: Page) -> int:
     return count
 
 
+# Button/link text that signals an actual sweepstakes ENTRY action.
+_ENTRY_BTN_WORDS = (
+    "enter to win", "enter now", "enter sweepstakes", "enter the sweepstakes",
+    "enter giveaway", "enter the giveaway", "enter contest", "enter the contest",
+    "enter for", "submit entry", "complete entry", "complete my entry",
+    "claim", "count me in", "i'm in", "im in", "get my entries",
+    "official entry", "play now", "spin", "enter",
+)
+# Button/link text that signals a NEWSLETTER / mailing-list signup (not an entry).
+_NEWSLETTER_BTN_WORDS = (
+    "subscribe", "sign up", "signup", "get the newsletter", "join our newsletter",
+    "join the newsletter", "join our list", "join our email", "get deals",
+    "notify me", "get updates", "get our emails",
+)
+
+
+async def _submit_button_intent(page: Page) -> str:
+    """
+    Classify the page's primary action from its visible buttons/links.
+
+    Returns 'entry' (an Enter/Submit-Entry style CTA is present), 'newsletter'
+    (only a Subscribe/Sign-up style CTA), or 'unknown'. Entry wins ties, since a
+    real entry page may also carry a newsletter checkbox.
+    """
+    try:
+        texts = await page.evaluate("""
+            () => {
+                const sel = "button, input[type=submit], input[type=button], " +
+                            "a[role=button], [class*='btn'], [class*='button']";
+                const out = [];
+                document.querySelectorAll(sel).forEach(e => {
+                    const r = e.getBoundingClientRect();
+                    if (r.width === 0 && r.height === 0) return;
+                    const t = (e.innerText || e.value ||
+                               e.getAttribute('aria-label') || '').trim().toLowerCase();
+                    if (t) out.push(t);
+                });
+                return out;
+            }
+        """)
+    except Exception:
+        texts = []
+    joined = " | ".join(texts)
+    if any(w in joined for w in _ENTRY_BTN_WORDS):
+        return "entry"
+    if any(w in joined for w in _NEWSLETTER_BTN_WORDS):
+        return "newsletter"
+    return "unknown"
+
+
+async def _is_real_entry_form(page: Page) -> bool:
+    """
+    Decide whether the current page is an actual sweepstakes entry (worth
+    filling / pausing for a CAPTCHA) versus a blog's newsletter or comment box.
+
+    True when any of:
+      • it has 2+ recognised entry fields (name/address/city/zip/phone/DOB), or
+      • it has an input AND an Enter-style submit button (covers email-only
+        sweepstakes — "enter your email and submit"), or
+      • it has an input with an ambiguous button but is NOT on a known
+        sweepstakes-blog domain (brand pages get the benefit of the doubt).
+    False for a lone newsletter/subscribe box, especially on blog domains.
+    """
+    if await _count_entry_fields(page) >= 2:
+        return True
+    if not await _has_form_fields(page):
+        return False
+    intent = await _submit_button_intent(page)
+    if intent == "entry":
+        return True
+    if intent == "newsletter":
+        return False
+    # Ambiguous button + a single field: attempt it unless we're on a blog whose
+    # newsletter box is the likely source of the CAPTCHA.
+    host = urlparse(page.url).netloc.lower()
+    host = host[4:] if host.startswith("www.") else host
+    if host in _AGGREGATOR_BLOG_DOMAINS:
+        return False
+    return True
+
+
 async def _wait_for_form(page: Page) -> bool:
     """Wait up to 8 s for any visible form element. Returns True if found."""
     try:
@@ -2158,8 +2239,9 @@ async def _advance_to_entry_form(page: Page, max_hops: int = 3) -> bool:
     """
     advanced = False
     for _ in range(max_hops):
-        # Already looking at a real multi-field entry form — nothing to do.
-        if await _count_entry_fields(page) >= 2:
+        # Stop as soon as a fillable form is present — don't click a real form's
+        # own "Enter" submit button (e.g. an email-only entry).
+        if await _has_form_fields(page):
             break
         el = await _find_enter_cta(page)
         if el is None:
@@ -2318,9 +2400,11 @@ async def fill_and_submit(
 
     # ── "Enter" click-through to the real form ────────────────────────────────
     # Many sweepstakes show a prize/landing page with an "Enter" button that
-    # leads to the actual entry form. If we're not already on a real multi-field
-    # form, click through those CTAs (up to a few hops) to reach it.
-    if await _count_entry_fields(page) < 2:
+    # leads to the actual entry form. If there's no fillable form on the page
+    # yet, click through those CTAs (up to a few hops) to reach it. (If a form
+    # is already present — even an email-only one — we leave its submit button
+    # alone and let the fill/submit loop handle it.)
+    if not await _has_form_fields(page):
         await _advance_to_entry_form(page)
 
     # ── Age gate bypass ───────────────────────────────────────────────────────
@@ -2332,6 +2416,11 @@ async def fill_and_submit(
     # ── Expiry check — skip closed sweepstakes immediately ────────────────────
     if await _is_expired(page):
         return {"status": "expired"}
+
+    # Classify the page once: is this a real sweepstakes entry (worth filling and
+    # pausing for a CAPTCHA) or a blog newsletter/comment box? Adapts per page —
+    # email-only "enter your email & submit" sweepstakes count as real entries.
+    is_entry_form = await _is_real_entry_form(page)
 
     # ── CAPTCHA detection & solving ───────────────────────────────────────────
     # In manual mode, give async CAPTCHA widgets a few seconds to render so we
@@ -2362,13 +2451,13 @@ async def fill_and_submit(
                     page.url,
                 )
                 return {"status": "needs_captcha"}
-            elif await _count_entry_fields(page) < 2:
-                # A CAPTCHA is showing, but the page has no real entry form — just
-                # a newsletter/comment box that happens to carry a reCAPTCHA (very
-                # common on sweepstakes *blogs*). Don't make the user solve it;
-                # skip the page instead of wasting their time.
+            elif not is_entry_form:
+                # A CAPTCHA is showing, but the page is not a real entry form —
+                # just a newsletter/comment box that happens to carry a reCAPTCHA
+                # (very common on sweepstakes *blogs*). Don't make the user solve
+                # it; skip the page instead of wasting their time.
                 logger.info(
-                    "CAPTCHA present but no real entry form on %s — looks like a "
+                    "CAPTCHA present but not a real entry form on %s — looks like a "
                     "newsletter/comment box; skipping.", page.url,
                 )
                 return {"status": "no_form"}
@@ -2476,9 +2565,9 @@ async def fill_and_submit(
             if await _detect_success(page):
                 return {"status": "entered", "steps": step + 1}
             # Manual mode: a CAPTCHA often appears only AFTER clicking submit.
-            # Only bother the user if we actually filled a real entry form (≥2
-            # fields) — otherwise it's a newsletter/comment CAPTCHA, not an entry.
-            if manual_captcha and not defer_captcha and (total_fields_filled >= 2):
+            # Only bother the user if this is a real entry (covers email-only
+            # sweepstakes) — never for a newsletter/comment CAPTCHA.
+            if manual_captcha and not defer_captcha and is_entry_form:
                 ct2, _sk2, ci2 = await _detect_captcha_wait(page, timeout=4.0)
                 if ct2 and ci2 and not await _is_captcha_solved(page):
                     logger.warning(

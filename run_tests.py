@@ -1000,13 +1000,14 @@ async def test_advance_to_entry_form_clicks_enter():
 
 
 async def test_manual_mode_skips_newsletter_captcha():
-    """Manual mode must NOT pause on a newsletter box (1 field) + CAPTCHA —
-    that's a blog page, not a sweepstakes entry. It should skip to no_form."""
+    """Manual mode must NOT pause on a newsletter box (email + Subscribe) + CAPTCHA
+    — that's a mailing-list signup, not a sweepstakes entry. Skip to no_form."""
     from sweepstake_genie.browser import BrowserManager
     from sweepstake_genie.form_filler import fill_and_submit
     html = """<html><body>
     <form>
       <input type="email" name="email" placeholder="Email">
+      <button type="submit">Subscribe</button>
       <div class="g-recaptcha" data-sitekey="X" style="width:304px;height:78px"></div>
     </form>
     </body></html>"""
@@ -1018,7 +1019,31 @@ async def test_manual_mode_skips_newsletter_captcha():
         )
         await page.close()
     assert result["status"] == "no_form", \
-        f"Newsletter box + captcha should skip to no_form, got {result}"
+        f"Newsletter (Subscribe) box + captcha should skip to no_form, got {result}"
+
+
+async def test_manual_mode_pauses_on_email_only_entry():
+    """An email-only sweepstakes ('enter your email' + Enter button) + CAPTCHA is
+    a REAL entry — manual mode should pause for it, not skip it."""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import fill_and_submit
+    html = """<html><body>
+    <h1>Win a Trip Sweepstakes</h1>
+    <form>
+      <input type="email" name="email" placeholder="Email">
+      <button type="submit">Enter to Win</button>
+      <div class="g-recaptcha" data-sitekey="X" style="width:304px;height:78px"></div>
+    </form>
+    </body></html>"""
+    async with BrowserManager(headless=True) as bm:
+        page = await bm.new_page()
+        await page.set_content(html)
+        result = await fill_and_submit(
+            page, _PROFILE, manual_captcha=True, manual_captcha_timeout=1
+        )
+        await page.close()
+    assert result["status"] == "captcha", \
+        f"Email-only entry + captcha should pause (then time out), got {result}"
 
 
 async def test_manual_mode_pauses_on_real_entry_form():
@@ -1082,6 +1107,7 @@ for fn in [
     test_detect_captcha_none_on_plain_page,
     test_advance_to_entry_form_clicks_enter,
     test_manual_mode_skips_newsletter_captcha,
+    test_manual_mode_pauses_on_email_only_entry,
     test_manual_mode_pauses_on_real_entry_form,
     test_manual_mode_skips_invisible_v3,
     test_defer_captcha_returns_needs_captcha,
