@@ -642,11 +642,58 @@ def test_get_retries_on_failure():
     assert session.get.call_count == 3, f"Expected 3 attempts, got {session.get.call_count}"
 
 
+def test_scrape_freebiemom_db():
+    """FreebieMom DB scraper extracts per-card Enter Here links with titles."""
+    from sweepstake_genie import scraper
+    from bs4 import BeautifulSoup
+
+    page1 = """<html><body>
+      <input type="text" name="s" placeholder="Search freebies, sweeps, brands">
+      <div class="fmsdb-card">
+        <h3>Amazon Spider-Man Premiere Sweepstakes</h3>
+        <a class="enter-btn" href="https://amazon.com/sweeps/spiderman">Enter Here</a>
+        <a href="/sweepstakes-database/amazon-spiderman/">More Info</a>
+      </div>
+      <div class="fmsdb-card">
+        <h3>Colgate Optic Obsessed Sweepstakes</h3>
+        <a href="https://colgate.com/win">Enter Daily</a>
+        <a href="https://twitter.com/share">Share</a>
+      </div>
+    </body></html>"""
+
+    calls = {"n": 0}
+
+    def fake_get(url, session, **kwargs):
+        calls["n"] += 1
+        if "fmsdb_page=1" in url:
+            return BeautifulSoup(page1, "html.parser")
+        return None  # page 2+ empty -> pagination stops
+
+    with patch("sweepstake_genie.scraper._get", side_effect=fake_get), \
+         patch("sweepstake_genie.scraper.time") as mock_time:
+        mock_time.sleep = MagicMock()
+        results = scraper._scrape_freebiemom_db(max_pages=5)
+
+    urls = {r["url"] for r in results}
+    titles = {r["title"] for r in results}
+    assert any("amazon.com/sweeps/spiderman" in u for u in urls), \
+        f"should capture the Amazon Enter Here link, got {urls}"
+    assert any("colgate.com/win" in u for u in urls), \
+        f"should capture the Colgate Enter Daily link, got {urls}"
+    assert not any("twitter.com" in u for u in urls), "should skip social share links"
+    assert not any("/sweepstakes-database/amazon-spiderman" in u for u in urls), \
+        "should skip 'More Info' links, only follow entry buttons"
+    assert "Amazon Spider-Man Premiere Sweepstakes" in titles, \
+        f"should pull the card heading as title, got {titles}"
+    assert all(r["source"] == "freebiemom_db" for r in results)
+
+
 for fn in [
     test_scrape_rss_valid,
     test_scrape_rss_filters_non_sweeps,
     test_scrape_pages_basic,
     test_scrape_pages_skips_twitter,
+    test_scrape_freebiemom_db,
     test_discover_all_mocked,
     test_discover_all_progress_callback,
     test_get_retries_on_failure,

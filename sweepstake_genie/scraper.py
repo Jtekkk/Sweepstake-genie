@@ -1130,6 +1130,90 @@ def _scrape_reddit_subs(subreddits: list[str]) -> list[dict[str, Any]]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# FreebieMom sweepstakes database (custom — it's a paginated card grid where each
+# card links out to the real entry via an "Enter Here"/"Enter Daily" button)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Anchor text that marks a "go to the actual entry" button on a FreebieMom card.
+_FMSDB_ENTER_TEXTS = (
+    "enter here", "enter daily", "enter now", "enter to win", "official link",
+)
+
+
+def _fmsdb_card_title(anchor) -> str | None:
+    """Walk up from an Enter button to find the sweepstakes card's heading."""
+    node = anchor
+    for _ in range(6):
+        node = getattr(node, "parent", None)
+        if node is None:
+            break
+        heading = node.find(["h1", "h2", "h3", "h4", "h5", "strong"])
+        if heading:
+            t = heading.get_text(strip=True)
+            if t and len(t) >= 5:
+                return t[:150]
+    return None
+
+
+def _scrape_freebiemom_db(max_pages: int = 12) -> list[dict[str, Any]]:
+    """
+    Scrape FreebieMom's sweepstakes database. Each card carries an
+    "Enter Here"/"Enter Daily"/"Official link" anchor that points to the actual
+    entry (an external sponsor page, or a freebiemom redirect that 302s to one).
+    We record those per-card links — internal ones included, since navigating to
+    a freebiemom redirect lands on the real entry.
+    """
+    session = requests.Session()
+    base = "https://freebiemom.com/sweepstakes-database/"
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for pg in range(1, max_pages + 1):
+        page_url = f"{base}?fmsdb_page={pg}"
+        soup = _get(page_url, session)
+        time.sleep(_DELAY)
+        if soup is None:
+            continue
+
+        found_here = 0
+        for anchor in soup.find_all("a", href=True):
+            href = anchor["href"].strip()
+            if not href or href.startswith(("#", "javascript:", "mailto:")):
+                continue
+            text = anchor.get_text(strip=True).lower()
+            cls = " ".join(anchor.get("class") or []).lower()
+            is_enter = any(t in text for t in _FMSDB_ENTER_TEXTS) or (
+                "enter" in cls and "search" not in cls
+            )
+            if not is_enter:
+                continue
+
+            full_url = urljoin(page_url, href)
+            # Drop social/share links; keep sponsor + freebiemom redirect links.
+            if _should_skip(full_url):
+                continue
+            normalized = _normalize_url(full_url)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+
+            title = _fmsdb_card_title(anchor) or urlparse(full_url).netloc
+            results.append({
+                "url": normalized,
+                "title": title,
+                "source": "freebiemom_db",
+            })
+            found_here += 1
+
+        # Stop paginating once a page past the first yields nothing new.
+        if found_here == 0 and pg > 1:
+            break
+
+    logger.info("freebiemom_db: %d sweepstakes across %d pages", len(results), pg)
+    return results
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Master discovery function
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1183,6 +1267,7 @@ def discover_all(
     for cfg in _RSS_SOURCES:
         tasks.append((cfg["name"], lambda c=cfg: _scrape_rss(c["feed"], c["name"])))
     tasks.append(("reddit", lambda: _scrape_reddit_subs(_REDDIT_SUBS)))
+    tasks.append(("freebiemom_db", lambda: _scrape_freebiemom_db()))
 
     total = len(tasks)
     done = 0
@@ -1211,4 +1296,5 @@ def list_sources() -> list[str]:
     names  = [cfg["name"] for cfg in _PAGE_SOURCES]
     names += [cfg["name"] for cfg in _RSS_SOURCES]
     names += [f"reddit_r_{s}" for s in _REDDIT_SUBS]
+    names += ["freebiemom_db"]
     return names
