@@ -2111,6 +2111,79 @@ async def _try_click_through(page: Page) -> bool:
     return False
 
 
+# CTAs that lead from a prize/landing page to the actual entry form. Ordered
+# most-specific first so we prefer a clear "Enter" button over a generic one.
+_ENTER_CTA_SELECTORS = [
+    "a:has-text('Enter Now')", "button:has-text('Enter Now')",
+    "a:has-text('Enter Here')", "button:has-text('Enter Here')",
+    "a:has-text('Click Here to Enter')", "a:has-text('Click to Enter')",
+    "button:has-text('Click Here to Enter')",
+    "a:has-text('Enter the Sweepstakes')", "a:has-text('Enter Sweepstakes')",
+    "button:has-text('Enter the Sweepstakes')",
+    "a:has-text('Enter the Giveaway')", "a:has-text('Enter Giveaway')",
+    "a:has-text('Enter the Contest')", "a:has-text('Enter Contest')",
+    "a:has-text('Enter to Win')", "button:has-text('Enter to Win')",
+    "a:has-text('Enter the Drawing')", "a:has-text('Enter Drawing')",
+    "a:has-text('Enter for a Chance')", "button:has-text('Enter for a Chance')",
+    "a:has-text('Enter Sweepstakes')", "a:has-text('Enter Contest Now')",
+    "input[type='submit'][value*='Enter' i]",
+    "input[type='button'][value*='Enter' i]",
+    "a[class*='enter' i][href]", "button[class*='enter' i]",
+    "a.enter-link", ".enter-btn", ".cta-enter", "[data-action='enter']",
+    "a.button:has-text('Enter')", "a.btn:has-text('Enter')",
+    "button:has-text('Enter ')",
+]
+
+
+async def _find_enter_cta(page: Page):
+    """Return the first visible 'Enter'-type call-to-action element, or None."""
+    for sel in _ENTER_CTA_SELECTORS:
+        try:
+            el = await page.query_selector(sel)
+            if el and await el.is_visible():
+                return el
+        except Exception:
+            continue
+    return None
+
+
+async def _advance_to_entry_form(page: Page, max_hops: int = 3) -> bool:
+    """
+    Many sweepstakes show a prize/landing page with an "Enter" button that leads
+    to the actual entry form. Click through those CTAs (up to *max_hops* times)
+    until a real entry form appears.
+
+    Links are forced to open in the same tab (their ``target`` is stripped) so
+    the flow keeps operating on this page. Returns True if anything was clicked.
+    """
+    advanced = False
+    for _ in range(max_hops):
+        # Already looking at a real multi-field entry form — nothing to do.
+        if await _count_entry_fields(page) >= 2:
+            break
+        el = await _find_enter_cta(page)
+        if el is None:
+            break
+        # Force same-tab navigation so we don't lose the flow to a popup.
+        try:
+            await el.evaluate("e => { try { e.removeAttribute('target'); } catch (_) {} }")
+        except Exception:
+            pass
+        try:
+            await el.click()
+        except Exception:
+            break
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=10_000)
+        except PlaywrightTimeout:
+            pass
+        await _dismiss_popup_overlays(page)
+        await _wait_for_form(page)
+        await asyncio.sleep(0.6)
+        advanced = True
+    return advanced
+
+
 # ── Main entry function ───────────────────────────────────────────────────────
 
 async def fill_and_submit(
@@ -2243,45 +2316,12 @@ async def fill_and_submit(
             if not await _follow_article_sweepstake_link(page):
                 return {"status": "no_form"}
 
-    # ── "Enter Now" link follower ──────────────────────────────────────────────
-    # Some aggregators or landing pages require clicking through to the form.
-    # We allow relative URLs and JS-triggered links (no href restriction).
-    if not await _has_form_fields(page):
-        _ENTER_LINK_SELECTORS = [
-            "a:has-text('Enter Now')",
-            "a:has-text('Enter Here')",
-            "a:has-text('Click to Enter')",
-            "a:has-text('Click Here to Enter')",
-            "a:has-text('Enter Sweepstakes')",
-            "a:has-text('Enter the Sweepstakes')",
-            "a:has-text('Enter Giveaway')",
-            "a:has-text('Enter to Win')",
-            "a:has-text('Enter the Giveaway')",
-            "a:has-text('Enter the Contest')",
-            "a:has-text('Enter the Drawing')",
-            "a:has-text('Enter Drawing')",
-            "button:has-text('Enter Now')",
-            "button:has-text('Enter Here')",
-            "button:has-text('Enter the Sweepstakes')",
-            "button:has-text('Click Here to Enter')",
-            "a.enter-link",
-            "a[class*='enter' i]",
-            "[data-action='enter']",
-            ".enter-btn", ".cta-enter",
-        ]
-        for sel in _ENTER_LINK_SELECTORS:
-            try:
-                el = await page.query_selector(sel)
-                if el and await el.is_visible():
-                    await el.click()
-                    try:
-                        await page.wait_for_load_state("domcontentloaded", timeout=12_000)
-                    except PlaywrightTimeout:
-                        pass
-                    await _wait_for_form(page)
-                    break
-            except Exception:
-                pass
+    # ── "Enter" click-through to the real form ────────────────────────────────
+    # Many sweepstakes show a prize/landing page with an "Enter" button that
+    # leads to the actual entry form. If we're not already on a real multi-field
+    # form, click through those CTAs (up to a few hops) to reach it.
+    if await _count_entry_fields(page) < 2:
+        await _advance_to_entry_form(page)
 
     # ── Age gate bypass ───────────────────────────────────────────────────────
     await _bypass_age_gate(page, profile)

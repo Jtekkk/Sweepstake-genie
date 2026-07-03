@@ -973,6 +973,32 @@ async def test_defer_captcha_ignores_invisible_v3():
         f"Invisible v3 must not be queued for manual solve, got {result}"
 
 
+async def test_advance_to_entry_form_clicks_enter():
+    """A landing page with an 'Enter Now' button that reveals the form should be
+    advanced to the form automatically."""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import _advance_to_entry_form, _count_entry_fields
+    html = """<html><body>
+    <h1>Win a Car Sweepstakes</h1>
+    <button id="enter" onclick="document.getElementById('f').style.display='block'">Enter Now</button>
+    <div id="f" style="display:none">
+      <input name="first_name" placeholder="First">
+      <input name="last_name" placeholder="Last">
+      <input name="city" placeholder="City">
+    </div>
+    </body></html>"""
+    async with BrowserManager(headless=True) as bm:
+        page = await bm.new_page()
+        await page.set_content(html)
+        before = await _count_entry_fields(page)
+        advanced = await _advance_to_entry_form(page)
+        after = await _count_entry_fields(page)
+        await page.close()
+    assert before < 2, f"Form should be hidden before clicking, got {before} fields"
+    assert advanced is True, "Should have clicked the Enter button"
+    assert after >= 2, f"Form should be revealed after clicking Enter, got {after} fields"
+
+
 async def test_manual_mode_skips_newsletter_captcha():
     """Manual mode must NOT pause on a newsletter box (1 field) + CAPTCHA —
     that's a blog page, not a sweepstakes entry. It should skip to no_form."""
@@ -1054,6 +1080,7 @@ for fn in [
     test_detect_captcha_v2_zero_height_still_interactive,
     test_detect_captcha_invisible_v3_not_interactive,
     test_detect_captcha_none_on_plain_page,
+    test_advance_to_entry_form_clicks_enter,
     test_manual_mode_skips_newsletter_captcha,
     test_manual_mode_pauses_on_real_entry_form,
     test_manual_mode_skips_invisible_v3,
