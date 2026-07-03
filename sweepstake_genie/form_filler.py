@@ -613,6 +613,20 @@ async def _detect_captcha(page: Page) -> tuple[str | None, str | None, bool]:
       cannot click to solve. Manual-solve mode uses this to avoid pausing on
       ordinary entry pages that merely carry an invisible v3 badge.
     """
+    # Fast path: one round-trip to check for ANY CAPTCHA marker. Most pages have
+    # none, and this avoids the ~8 sequential DOM lookups the full scan below does.
+    try:
+        has_marker = await page.evaluate("""
+            () => !!document.querySelector(
+                ".g-recaptcha, [data-sitekey], .grecaptcha-badge, " +
+                "iframe[src*='recaptcha'], .h-captcha, [data-hcaptcha-sitekey], " +
+                "iframe[src*='hcaptcha'], .cf-turnstile, iframe[src*='challenges.cloudflare']")
+        """)
+    except Exception:
+        has_marker = True  # on error, fall through to the full scan
+    if not has_marker:
+        return None, None, False
+
     # ── reCAPTCHA ─────────────────────────────────────────────────────────────
     recaptcha_present = False
     recaptcha_interactive = False
@@ -1830,36 +1844,37 @@ async def _enter_generic_iframe(page: Page, profile: dict[str, str]) -> dict[str
     return None
 
 
-async def _detect_success(page: Page) -> bool:
-    """Return True if the current page shows signs of a successful entry."""
-    url = page.url.lower()
-    if any(p in url for p in _SUCCESS_URL_PATTERNS):
+async def _body_text(page: Page) -> str:
+    """Return the page's body text, lower-cased (one DOM round-trip)."""
+    try:
+        return (await page.text_content("body") or "").lower()
+    except Exception:
+        return ""
+
+
+async def _detect_success(page: Page, text: str | None = None) -> bool:
+    """
+    Return True if the current page shows signs of a successful entry.
+
+    Pass ``text`` (pre-fetched lower-cased body text) to avoid re-fetching the
+    page body when several text checks run at the same checkpoint.
+    """
+    if any(p in page.url.lower() for p in _SUCCESS_URL_PATTERNS):
         return True
-    try:
-        content = (await page.text_content("body") or "").lower()
-        if any(p in content for p in _SUCCESS_TEXT_PATTERNS):
-            return True
-    except Exception:
-        pass
-    return False
+    content = text if text is not None else await _body_text(page)
+    return any(p in content for p in _SUCCESS_TEXT_PATTERNS)
 
 
-async def _is_expired(page: Page) -> bool:
+async def _is_expired(page: Page, text: str | None = None) -> bool:
     """Return True if the page indicates the sweepstake is closed/expired."""
-    try:
-        content = (await page.text_content("body") or "").lower()
-        return any(p in content for p in _EXPIRED_PATTERNS)
-    except Exception:
-        return False
+    content = text if text is not None else await _body_text(page)
+    return any(p in content for p in _EXPIRED_PATTERNS)
 
 
-async def _check_daily_entry(page: Page) -> bool:
+async def _check_daily_entry(page: Page, text: str | None = None) -> bool:
     """Return True if the page indicates daily re-entry is allowed."""
-    try:
-        content = (await page.text_content("body") or "").lower()
-        return any(p in content for p in _DAILY_ENTRY_PATTERNS)
-    except Exception:
-        return False
+    content = text if text is not None else await _body_text(page)
+    return any(p in content for p in _DAILY_ENTRY_PATTERNS)
 
 
 async def _fill_field(page: Page, selectors: list[str], value: str, is_select: bool = False) -> bool:
@@ -2224,7 +2239,9 @@ def _country_candidates(value: str) -> list[str]:
     return out
 
 
-async def _detect_blocking_wall(page: Page, has_entry_form: bool | None = None) -> str | None:
+async def _detect_blocking_wall(
+    page: Page, has_entry_form: bool | None = None, text: str | None = None
+) -> str | None:
     """
     Return a reason string if the page is an un-enterable wall, else None.
 
@@ -2234,10 +2251,7 @@ async def _detect_blocking_wall(page: Page, has_entry_form: bool | None = None) 
         email/entry form is attempted rather than skipped.
     Age eligibility text is intentionally NOT treated as a wall.
     """
-    try:
-        content = (await page.text_content("body") or "").lower()
-    except Exception:
-        return None
+    content = text if text is not None else await _body_text(page)
     if any(p in content for p in _WALL_PATTERNS_GEO):
         return "not available in your region"
     if has_entry_form is None:
@@ -2314,7 +2328,6 @@ _AGGREGATOR_BLOG_DOMAINS: frozenset[str] = frozenset([
     "sweepstakesinsider.com", "singlemomsincome.com",
     "dailycheapskate.com", "budgetsavvydiva.com", "thriftyjinxy.com",
     "sweepstakeswithkathy.com", "giveawaybase.com", "winbigpicture.com",
-    "winbigpicture.com",
 ])
 
 # Social/shortener domains to skip when extracting article links
@@ -2667,8 +2680,11 @@ async def fill_and_submit(
     # ── Wait for dynamic form to load ─────────────────────────────────────────
     await _wait_for_form(page)
 
+    # Fetch the body text once and reuse it across the expiry + wall checks.
+    _btext = await _body_text(page)
+
     # ── Expiry check — skip closed sweepstakes immediately ────────────────────
-    if await _is_expired(page):
+    if await _is_expired(page, text=_btext):
         return {"status": "expired"}
 
     # Classify the page once: is this a real sweepstakes entry (worth filling and
@@ -2678,7 +2694,7 @@ async def fill_and_submit(
 
     # ── Un-enterable wall check — geo block, or login wall with no form ────────
     # Skip these before filling or (worse) pausing the user on a login CAPTCHA.
-    _wall = await _detect_blocking_wall(page, has_entry_form=is_entry_form)
+    _wall = await _detect_blocking_wall(page, has_entry_form=is_entry_form, text=_btext)
     if _wall:
         logger.info("Skipping %s — %s.", page.url, _wall)
         return {"status": "no_form", "detail": _wall}
@@ -2767,11 +2783,12 @@ async def fill_and_submit(
     submitted = False
 
     for step in range(8):
-        # Check for expiry/success on steps after the first
+        # Check for expiry/success on steps after the first (one body fetch)
         if step > 0:
-            if await _detect_success(page):
+            _step_text = await _body_text(page)
+            if await _detect_success(page, text=_step_text):
                 return {"status": "entered", "steps": step}
-            if await _is_expired(page):
+            if await _is_expired(page, text=_step_text):
                 return {"status": "expired"}
 
         fields_filled = 0

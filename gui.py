@@ -520,14 +520,9 @@ class SweepstakeGenieApp(ctk.CTk):
                     source_counts[name] = count
 
                 sweepstakes = discover_all(on_source=_on_source)
-                new_count = 0
-                for sw in sweepstakes:
-                    if self._stop_flag.is_set():
-                        self._log_queue.put(f"[{_ts()}] Stopped by user.")
-                        break
-                    added = db.add_sweepstake(sw["url"], sw["title"], sw["source"])
-                    if added:
-                        new_count += 1
+                # One transaction for the whole batch instead of a connection per
+                # row (hundreds of rows -> a single fast insert).
+                new_count = db.add_sweepstakes_bulk(sweepstakes)
 
                 # Per-source breakdown so it's clear which sources are producing.
                 nonzero = {k: v for k, v in source_counts.items() if v}
