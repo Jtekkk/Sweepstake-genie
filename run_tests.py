@@ -973,6 +973,106 @@ async def test_defer_captcha_ignores_invisible_v3():
         f"Invisible v3 must not be queued for manual solve, got {result}"
 
 
+async def test_fill_required_controls():
+    """Required dropdowns, radio groups, and eligibility checkboxes get filled."""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import _fill_required_controls
+    html = """<html><body><form>
+      <select name="country">
+        <option value="">Select</option>
+        <option value="US">United States</option>
+        <option value="CA">Canada</option>
+      </select>
+      <select name="prize">
+        <option value="">Choose a prize</option>
+        <option value="a">Prize A</option>
+        <option value="b">Prize B</option>
+      </select>
+      <input type="checkbox" name="agree_rules" required>
+      <label><input type="radio" name="eligible" value="no"> No</label>
+      <label><input type="radio" name="eligible" value="yes"> Yes</label>
+    </form></body></html>"""
+    async with BrowserManager(headless=True) as bm:
+        page = await bm.new_page()
+        await page.set_content(html)
+        await _fill_required_controls(page, {"country": "US"})
+        country = await page.eval_on_selector("select[name=country]", "e => e.value")
+        prize = await page.eval_on_selector("select[name=prize]", "e => e.value")
+        rules = await page.eval_on_selector("input[name=agree_rules]", "e => e.checked")
+        yes = await page.eval_on_selector("input[name=eligible][value=yes]", "e => e.checked")
+        await page.close()
+    assert country == "US", f"country should be US, got {country!r}"
+    assert prize == "a", f"prize should pick first real option 'a', got {prize!r}"
+    assert rules is True, "required rules checkbox should be checked"
+    assert yes is True, "yes/no eligibility radio should pick 'yes'"
+
+
+async def test_detect_blocking_wall():
+    """Geo blocks and form-less login walls are recognised; normal eligibility
+    text (age rules) and pages with an entry form are NOT skipped."""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import _detect_blocking_wall
+    cases = [
+        # Geo block — always a wall
+        ("<body>This promotion is not available in your country.</body>", "region"),
+        # Login text with NO form — a wall
+        ("<body>Please sign in to enter.<a href='/login'>Sign In</a></body>", "login"),
+        # Login text but WITH an entry form — NOT a wall (attempt it)
+        ("<body>Sign in to enter faster, or enter below.<form>"
+         "<input name=first_name><input name=last_name><input name=city>"
+         "<button>Enter</button></form></body>", None),
+        # Age eligibility rule — NOT a wall (very common on legit pages)
+        ("<body>You must be at least 18 to enter this sweepstakes.</body>", None),
+        # Normal entry page
+        ("<body><h1>Enter to Win a Car</h1><form><input name=email>"
+         "<button>Enter</button></form></body>", None),
+    ]
+    async with BrowserManager(headless=True) as bm:
+        for html, expect in cases:
+            page = await bm.new_page()
+            await page.set_content(html)
+            reason = await _detect_blocking_wall(page)
+            await page.close()
+            if expect is None:
+                assert reason is None, f"expected no wall, got {reason!r} for {html[:45]}"
+            else:
+                assert reason and expect in reason, \
+                    f"expected '{expect}' wall, got {reason!r} for {html[:45]}"
+
+
+async def test_has_unmet_required():
+    """HTML5 validation state is detected: empty required = unmet, filled = met."""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import _has_unmet_required
+    async with BrowserManager(headless=True) as bm:
+        page = await bm.new_page()
+        await page.set_content("<form><input type='email' required></form>")
+        empty = await _has_unmet_required(page)
+        await page.set_content("<form><input type='email' required value='a@b.com'></form>")
+        filled = await _has_unmet_required(page)
+        await page.close()
+    assert empty is True, "empty required field should be unmet"
+    assert filled is False, "valid filled required field should be met"
+
+
+async def test_fill_and_submit_skips_login_wall():
+    """A page that requires login to enter should be skipped as no_form."""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import fill_and_submit
+    html = """<html><body>
+    <h1>Sweepstakes</h1>
+    <p>Please log in to enter.</p>
+    <a href="/login">Sign In</a>
+    </body></html>"""
+    async with BrowserManager(headless=True) as bm:
+        page = await bm.new_page()
+        await page.set_content(html)
+        result = await fill_and_submit(page, _PROFILE, manual_captcha=False)
+        await page.close()
+    assert result["status"] == "no_form", \
+        f"Form-less login wall should be skipped as no_form, got {result}"
+
+
 async def test_advance_to_entry_form_clicks_enter():
     """A landing page with an 'Enter Now' button that reveals the form should be
     advanced to the form automatically."""
@@ -1105,6 +1205,10 @@ for fn in [
     test_detect_captcha_v2_zero_height_still_interactive,
     test_detect_captcha_invisible_v3_not_interactive,
     test_detect_captcha_none_on_plain_page,
+    test_fill_required_controls,
+    test_detect_blocking_wall,
+    test_has_unmet_required,
+    test_fill_and_submit_skips_login_wall,
     test_advance_to_entry_form_clicks_enter,
     test_manual_mode_skips_newsletter_captcha,
     test_manual_mode_pauses_on_email_only_entry,

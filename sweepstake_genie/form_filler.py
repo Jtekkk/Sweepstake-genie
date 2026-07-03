@@ -329,6 +329,27 @@ _DAILY_ENTRY_PATTERNS = [
     "enter again each day", "you may enter again",
 ]
 
+# Un-enterable walls. Kept deliberately NARROW to avoid skipping legit pages —
+# e.g. "you must be 18 to enter" is normal eligibility text, NOT a wall, so age
+# rules are intentionally excluded here.
+#
+# Geo blocks apply regardless of whether a form is present (if you're not in an
+# eligible region you can't win). Login is only treated as a wall when there is
+# no entry form to fill — a page that offers an email form is attempted.
+_WALL_PATTERNS_GEO: tuple[str, ...] = (
+    "not available in your country", "not available in your region",
+    "not available in your location", "this promotion is not available in your",
+    "this sweepstakes is not available in your",
+    "not open to residents of your country", "not open to residents of your region",
+    "sweepstakes is not open to residents of your",
+)
+_WALL_PATTERNS_LOGIN: tuple[str, ...] = (
+    "sign in to enter", "log in to enter", "login to enter",
+    "please sign in to enter", "please log in to enter",
+    "you must be logged in to enter", "sign in to your account to enter",
+    "create an account to enter", "register an account to enter",
+)
+
 _FIELD_DELAY_MIN = 0.15
 _FIELD_DELAY_MAX = 0.45
 
@@ -2019,6 +2040,215 @@ async def _check_terms(page: Page) -> None:
             logger.debug("check_terms selector=%s error=%s", sel, exc)
 
 
+async def _fill_required_controls(page: Page, profile: dict[str, str]) -> None:
+    """
+    Fill the form controls that the field-by-field pass tends to miss but which
+    commonly block submission: <select> dropdowns, radio-button groups, and
+    required consent/eligibility checkboxes.
+
+    Conservative by design — it only touches controls that are still UNSET, and
+    prefers affirmative / sensible values (US country, "Yes"/"I agree", the
+    first real option). This is what lets a real multi-field entry form actually
+    submit instead of bouncing on a missing required field.
+    """
+    country = profile.get("country", "US") or "US"
+    dob_month = profile.get("dob_month", "")
+    dob_day = profile.get("dob_day", "")
+    dob_year = profile.get("dob_year", "")
+
+    # ── <select> dropdowns ────────────────────────────────────────────────────
+    try:
+        selects = await page.query_selector_all("select")
+    except Exception:
+        selects = []
+    for sel in selects:
+        try:
+            if not await sel.is_visible() or not await sel.is_enabled():
+                continue
+            meta = ((await sel.get_attribute("name") or "") + " " +
+                    (await sel.get_attribute("id") or "") + " " +
+                    (await sel.get_attribute("aria-label") or "")).lower()
+            # State is handled elsewhere; skip so we don't override it.
+            if "state" in meta or "province" in meta or "region" in meta:
+                continue
+            # Skip if a real (non-placeholder) option is already selected.
+            already = await sel.evaluate(
+                "e => e.selectedIndex > 0 && !!(e.value && e.value.trim())"
+            )
+            if already:
+                continue
+            desired = None
+            if "countr" in meta:
+                desired = country
+            elif "month" in meta and dob_month:
+                desired = dob_month
+            elif "day" in meta and dob_day:
+                desired = dob_day
+            elif "year" in meta and dob_year:
+                desired = dob_year
+            picked = False
+            if desired:
+                for cand in _country_candidates(desired) if "countr" in meta else [desired]:
+                    try:
+                        await sel.select_option(value=cand)
+                        picked = True
+                        break
+                    except Exception:
+                        try:
+                            await sel.select_option(label=cand)
+                            picked = True
+                            break
+                        except Exception:
+                            continue
+            if not picked:
+                # Fall back to the first real (non-placeholder) option.
+                await sel.evaluate("""
+                    e => {
+                        const bad = ['select','choose','--','none','please select',
+                                     'select one','select...','select an option','pick one'];
+                        for (const o of e.options) {
+                            const v = (o.value || '').trim();
+                            const t = (o.textContent || '').trim().toLowerCase();
+                            if (!v) continue;
+                            if (!t) { }  // value but no text — still usable
+                            else if (bad.some(p => t === p || t.startsWith(p))) continue;
+                            e.value = o.value;
+                            e.dispatchEvent(new Event('input', {bubbles: true}));
+                            e.dispatchEvent(new Event('change', {bubbles: true}));
+                            return;
+                        }
+                    }
+                """)
+            await asyncio.sleep(0.1)
+        except Exception as exc:
+            logger.debug("required select error: %s", exc)
+
+    # ── Radio-button groups ───────────────────────────────────────────────────
+    # Only act on groups that are required or look like a yes/no eligibility
+    # question, and prefer the affirmative option (Yes / I agree / 18+).
+    try:
+        await page.evaluate("""
+            () => {
+                const radios = Array.from(document.querySelectorAll('input[type=radio]'));
+                const groups = {};
+                radios.forEach(r => {
+                    const k = r.name || r.id;
+                    if (!k) return;
+                    (groups[k] = groups[k] || []).push(r);
+                });
+                const affirmative = /(^|\\b)(yes|agree|i agree|accept|confirm|18|21|older|eligible|us|united states)(\\b|$)/i;
+                Object.values(groups).forEach(group => {
+                    const vis = group.filter(r => {
+                        const rc = r.getBoundingClientRect();
+                        return (rc.width > 0 || rc.height > 0);
+                    });
+                    if (!vis.length) return;
+                    if (vis.some(r => r.checked)) return;
+                    const required = vis.some(r => r.required || r.getAttribute('aria-required') === 'true');
+                    const labels = vis.map(r => (r.value || '') + ' ' +
+                        (r.getAttribute('aria-label') || '') + ' ' +
+                        (r.labels && r.labels[0] ? r.labels[0].textContent : '')).join(' ');
+                    const yesno = /\\byes\\b/i.test(labels) && /\\bno\\b/i.test(labels);
+                    if (!required && !yesno) return;   // leave optional non-binary groups alone
+                    let pick = vis.find(r => affirmative.test(
+                        (r.value || '') + ' ' +
+                        (r.getAttribute('aria-label') || '') + ' ' +
+                        (r.labels && r.labels[0] ? r.labels[0].textContent : '')));
+                    pick = pick || vis[0];
+                    pick.checked = true;
+                    pick.dispatchEvent(new Event('input', {bubbles: true}));
+                    pick.dispatchEvent(new Event('change', {bubbles: true}));
+                    pick.dispatchEvent(new Event('click', {bubbles: true}));
+                });
+            }
+        """)
+    except Exception as exc:
+        logger.debug("required radio error: %s", exc)
+
+    # ── Required / eligibility checkboxes ─────────────────────────────────────
+    _CHECK_KEYS = ("age", "18", "21", "eligib", "rules", "official", "confirm",
+                   "verify", "accept", "privacy", "terms", "agree", "consent",
+                   "certify", "resident")
+    try:
+        boxes = await page.query_selector_all("input[type=checkbox]")
+    except Exception:
+        boxes = []
+    for box in boxes:
+        try:
+            if not await box.is_visible() or await box.is_checked():
+                continue
+            required = await box.evaluate(
+                "e => e.required || e.getAttribute('aria-required') === 'true'"
+            )
+            meta = ((await box.get_attribute("name") or "") + " " +
+                    (await box.get_attribute("id") or "") + " " +
+                    (await box.get_attribute("aria-label") or "")).lower()
+            if required or any(k in meta for k in _CHECK_KEYS):
+                await box.check()
+                await asyncio.sleep(0.1)
+        except Exception as exc:
+            logger.debug("required checkbox error: %s", exc)
+
+
+def _country_candidates(value: str) -> list[str]:
+    """Return likely accepted country values for a US-ish profile value."""
+    v = (value or "").strip()
+    base = [v, "US", "USA", "United States", "United States of America", "U.S."]
+    # De-dup while preserving order
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in base:
+        if c and c.lower() not in seen:
+            seen.add(c.lower())
+            out.append(c)
+    return out
+
+
+async def _detect_blocking_wall(page: Page, has_entry_form: bool | None = None) -> str | None:
+    """
+    Return a reason string if the page is an un-enterable wall, else None.
+
+    Conservative on purpose (skipping a legit sweepstakes is worse than trying):
+      • Geo block  → always a wall (you can't win from an ineligible region).
+      • Login wall → only when there is NO entry form to fill; a page offering an
+        email/entry form is attempted rather than skipped.
+    Age eligibility text is intentionally NOT treated as a wall.
+    """
+    try:
+        content = (await page.text_content("body") or "").lower()
+    except Exception:
+        return None
+    if any(p in content for p in _WALL_PATTERNS_GEO):
+        return "not available in your region"
+    if has_entry_form is None:
+        has_entry_form = await _is_real_entry_form(page)
+    if not has_entry_form and any(p in content for p in _WALL_PATTERNS_LOGIN):
+        return "login required"
+    return None
+
+
+async def _has_unmet_required(page: Page) -> bool:
+    """
+    True if a visible form control fails native HTML5 validation (e.g. a required
+    field left empty or an invalid email) — a reliable signal that a submit did
+    NOT go through, so we shouldn't falsely report the entry as successful.
+    """
+    try:
+        return bool(await page.evaluate("""
+            () => {
+                const els = Array.from(document.querySelectorAll('input, select, textarea'));
+                return els.some(e => {
+                    if (e.type === 'hidden' || e.disabled) return false;
+                    const r = e.getBoundingClientRect();
+                    if (r.width === 0 && r.height === 0) return false;
+                    return e.willValidate && !e.checkValidity();
+                });
+            }
+        """))
+    except Exception:
+        return False
+
+
 async def _click_submit(page: Page) -> bool:
     """Find and click the submit button. Returns True if clicked."""
     for sel in _SUBMIT_SELECTORS:
@@ -2422,6 +2652,13 @@ async def fill_and_submit(
     # email-only "enter your email & submit" sweepstakes count as real entries.
     is_entry_form = await _is_real_entry_form(page)
 
+    # ── Un-enterable wall check — geo block, or login wall with no form ────────
+    # Skip these before filling or (worse) pausing the user on a login CAPTCHA.
+    _wall = await _detect_blocking_wall(page, has_entry_form=is_entry_form)
+    if _wall:
+        logger.info("Skipping %s — %s.", page.url, _wall)
+        return {"status": "no_form", "detail": _wall}
+
     # ── CAPTCHA detection & solving ───────────────────────────────────────────
     # In manual mode, give async CAPTCHA widgets a few seconds to render so we
     # reliably catch (and pause on) real v2/hCaptcha checkboxes.
@@ -2551,9 +2788,15 @@ async def fill_and_submit(
         await _dismiss_popup_overlays(page)
         await _check_terms(page)
 
+        # Fill the controls the field-by-field pass misses (dropdowns, radio
+        # groups, required consent/eligibility checkboxes) so the form can submit.
+        if fields_filled > 0 or is_entry_form:
+            await _fill_required_controls(page, profile)
+
         total_fields_filled += fields_filled
 
         # Try submitting
+        url_before = page.url
         clicked = await _click_submit(page)
         if clicked:
             # Wait for SPA transitions or page loads after submit
@@ -2588,7 +2831,31 @@ async def fill_and_submit(
             # Check if another step appeared
             next_clicked = await _try_next_step(page)
             if not next_clicked:
-                # No next step, no clear success — assume entered
+                # No next step and no success text yet — figure out what actually
+                # happened instead of blindly assuming the entry went through.
+                wall = await _detect_blocking_wall(page, has_entry_form=is_entry_form)
+                if wall:
+                    return {"status": "no_form", "detail": wall}
+                # If the page never navigated AND a required/invalid field remains,
+                # the browser blocked the submit — the entry did NOT go through.
+                # (If the URL changed, submission progressed, so we don't second-
+                # guess it on unrelated required fields like footer newsletters.)
+                if page.url == url_before and await _has_unmet_required(page):
+                    # Fill what we can and try once more before giving up.
+                    await _fill_required_controls(page, profile)
+                    await _check_terms(page)
+                    if await _click_submit(page):
+                        try:
+                            await page.wait_for_load_state("domcontentloaded", timeout=5_000)
+                        except PlaywrightTimeout:
+                            await asyncio.sleep(1.5)
+                        if await _detect_success(page):
+                            return {"status": "entered", "steps": step + 1}
+                    if page.url == url_before and await _has_unmet_required(page):
+                        # Still blocked — report an error rather than a false entry.
+                        return {"status": "error",
+                                "message": "form has unmet required fields after submit"}
+                # No wall, no outstanding validation error — treat as entered.
                 submitted = True
                 break
         else:
