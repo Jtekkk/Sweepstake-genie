@@ -405,15 +405,39 @@ _GENDER_SELECT_SELECTORS = [
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 async def _has_form_fields(page: Page) -> bool:
-    """Return True if visible form input fields are already on the page."""
+    """
+    Return True if the page has a visible *fillable* input.
+
+    Deliberately ignores site search boxes (type=search, or a text input whose
+    name/id/placeholder mentions "search"). Aggregator listing pages — e.g.
+    FreebieMom — put a "Search sweeps" box at the top of every page; without this
+    exclusion that search box would count as a form and stop us from clicking the
+    per-sweepstakes "Enter Here" button to reach the real entry.
+    """
     try:
-        for sel in ["input[type='email']", "input[type='text']:not([type='hidden'])", "input[type='tel']"]:
-            el = await page.query_selector(sel)
-            if el and await el.is_visible():
-                return True
+        return bool(await page.evaluate("""
+            () => {
+                const els = document.querySelectorAll(
+                    "input[type='email'], input[type='tel'], input[type='number'], " +
+                    "input[type='text'], input:not([type]), textarea");
+                for (const e of els) {
+                    const t = (e.getAttribute('type') || '').toLowerCase();
+                    if (t === 'search' || t === 'hidden') continue;
+                    const meta = ((e.name || '') + ' ' + (e.id || '') + ' ' +
+                                  (e.placeholder || '') + ' ' +
+                                  (e.getAttribute('aria-label') || '')).toLowerCase();
+                    if (meta.includes('search')) continue;
+                    const r = e.getBoundingClientRect();
+                    if (r.width === 0 && r.height === 0) continue;
+                    const s = getComputedStyle(e);
+                    if (s.display === 'none' || s.visibility === 'hidden') continue;
+                    return true;
+                }
+                return false;
+            }
+        """))
     except Exception:
-        pass
-    return False
+        return False
 
 
 async def _count_entry_fields(page: Page) -> int:
@@ -2433,6 +2457,10 @@ _ENTER_CTA_SELECTORS = [
     "a:has-text('Enter the Drawing')", "a:has-text('Enter Drawing')",
     "a:has-text('Enter for a Chance')", "button:has-text('Enter for a Chance')",
     "a:has-text('Enter Sweepstakes')", "a:has-text('Enter Contest Now')",
+    # Aggregator "go to the sweepstakes" buttons (FreebieMom etc.)
+    "a:has-text('Enter Daily')", "button:has-text('Enter Daily')",
+    "a:has-text('Official link')", "a:has-text('Official Rules Link')",
+    "a:has-text('Go to Sweepstakes')", "a:has-text('Visit Sweepstakes')",
     "input[type='submit'][value*='Enter' i]",
     "input[type='button'][value*='Enter' i]",
     "a[class*='enter' i][href]", "button[class*='enter' i]",

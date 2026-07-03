@@ -1073,6 +1073,47 @@ async def test_fill_and_submit_skips_login_wall():
         f"Form-less login wall should be skipped as no_form, got {result}"
 
 
+async def test_has_form_fields_ignores_search():
+    """A site search box must NOT count as a fillable form (FreebieMom case)."""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import _has_form_fields
+    async with BrowserManager(headless=True) as bm:
+        page = await bm.new_page()
+        await page.set_content(
+            "<input type='text' name='s' placeholder='Search freebies, sweeps, brands'>")
+        search_only = await _has_form_fields(page)
+        await page.set_content("<input type='search' aria-label='Search'>")
+        typed_search = await _has_form_fields(page)
+        await page.set_content("<input type='email' name='email'>")
+        real = await _has_form_fields(page)
+        await page.close()
+    assert search_only is False, "a text search box should not count as a form field"
+    assert typed_search is False, "type=search should not count as a form field"
+    assert real is True, "a real email input should count as a form field"
+
+
+async def test_advance_past_search_box_to_enter_here():
+    """A listing-style page (search box + 'Enter Here') should still advance to
+    the entry form when 'Enter Here' reveals it."""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import _advance_to_entry_form, _count_entry_fields
+    html = """<html><body>
+    <input type="text" name="s" placeholder="Search freebies, sweeps, brands">
+    <button onclick="document.getElementById('f').style.display='block'">Enter Here</button>
+    <div id="f" style="display:none">
+      <input name="first_name"><input name="last_name"><input name="city">
+    </div>
+    </body></html>"""
+    async with BrowserManager(headless=True) as bm:
+        page = await bm.new_page()
+        await page.set_content(html)
+        advanced = await _advance_to_entry_form(page)
+        after = await _count_entry_fields(page)
+        await page.close()
+    assert advanced is True, "should click 'Enter Here' despite the search box"
+    assert after >= 2, f"entry form should be revealed, got {after} fields"
+
+
 async def test_advance_to_entry_form_clicks_enter():
     """A landing page with an 'Enter Now' button that reveals the form should be
     advanced to the form automatically."""
@@ -1242,6 +1283,8 @@ for fn in [
     test_detect_blocking_wall,
     test_has_unmet_required,
     test_fill_and_submit_skips_login_wall,
+    test_has_form_fields_ignores_search,
+    test_advance_past_search_box_to_enter_here,
     test_advance_to_entry_form_clicks_enter,
     test_manual_mode_skips_newsletter_captcha,
     test_email_plus_plain_submit_is_entry,
