@@ -438,6 +438,17 @@ def _is_real_box(box, min_w: int = 40, min_h: int = 40) -> bool:
     return bool(box and box.get("width", 0) >= min_w and box.get("height", 0) >= min_h)
 
 
+def _box_present(box) -> bool:
+    """
+    True if the element is laid out on the page (has any extent).
+
+    Deliberately lenient: a reCAPTCHA v2 container often reports height 0 until
+    its iframe injects, so requiring a large size would miss real, solvable
+    widgets. ``display:none`` elements return no box and are correctly excluded.
+    """
+    return bool(box and (box.get("width", 0) > 0 or box.get("height", 0) > 0))
+
+
 async def _detect_captcha(page: Page) -> tuple[str | None, str | None, bool]:
     """
     Detect a CAPTCHA and return (type, sitekey, interactive).
@@ -469,11 +480,12 @@ async def _detect_captcha(page: Page) -> tuple[str | None, str | None, bool]:
 
     # A rendered anchor iframe means a clickable v2 checkbox is on the page.
     for sel in ('iframe[src*="recaptcha"][src*="anchor"]',
-                'iframe[title="reCAPTCHA"]'):
+                'iframe[title="reCAPTCHA"]',
+                'iframe[title*="recaptcha" i]'):
         el, box = await _element_box(page, sel)
         if el is not None:
             recaptcha_present = True
-            if _is_real_box(box, 20, 20):
+            if _box_present(box):
                 recaptcha_interactive = True
                 if not recaptcha_sitekey:
                     src = await el.get_attribute("src") or ""
@@ -481,13 +493,14 @@ async def _detect_captcha(page: Page) -> tuple[str | None, str | None, bool]:
                         recaptcha_sitekey = src.split("k=")[1].split("&")[0]
             break
 
-    # A visible, non-invisible .g-recaptcha container is also an interactive v2.
+    # A rendered, non-invisible .g-recaptcha container is an interactive v2 —
+    # even if its iframe hasn't injected yet (height may momentarily be 0).
     if not recaptcha_interactive:
         el, box = await _element_box(page, ".g-recaptcha")
         if el is not None:
             recaptcha_present = True
             size = (await el.get_attribute("data-size") or "").lower()
-            if size != "invisible" and _is_real_box(box):
+            if size != "invisible" and _box_present(box):
                 recaptcha_interactive = True
             if not recaptcha_sitekey:
                 recaptcha_sitekey = await el.get_attribute("data-sitekey")
@@ -520,7 +533,7 @@ async def _detect_captcha(page: Page) -> tuple[str | None, str | None, bool]:
         el, box = await _element_box(page, sel)
         if el is not None:
             size = (await el.get_attribute("data-size") or "").lower()
-            interactive = size != "invisible" and _is_real_box(box, 20, 20)
+            interactive = size != "invisible" and _box_present(box)
             if not hcaptcha_sitekey:
                 hcaptcha_sitekey = await el.get_attribute("data-sitekey")
             return "hcaptcha", hcaptcha_sitekey, interactive
@@ -530,9 +543,29 @@ async def _detect_captcha(page: Page) -> tuple[str | None, str | None, bool]:
         el, box = await _element_box(page, sel)
         if el is not None:
             sitekey = await el.get_attribute("data-sitekey")
-            return "recaptcha", sitekey, _is_real_box(box, 20, 20)
+            return "recaptcha", sitekey, _box_present(box)
 
     return None, None, False
+
+
+async def _detect_captcha_wait(page: Page, timeout: float = 6.0) -> tuple[str | None, str | None, bool]:
+    """
+    Like :func:`_detect_captcha`, but gives an async-loading widget a few seconds
+    to finish rendering before deciding whether it is interactive.
+
+    reCAPTCHA / hCaptcha inject their iframes after page load, so a single check
+    can miss a real, solvable widget. This polls until an interactive CAPTCHA is
+    found or *timeout* elapses. Pages with no CAPTCHA at all return immediately.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    ctype, sitekey, interactive = await _detect_captcha(page)
+    # Only keep waiting while there is a hint of a CAPTCHA that hasn't rendered
+    # its interactive widget yet — never stall a page that has none.
+    while (loop.time() < deadline) and ctype and not interactive:
+        await asyncio.sleep(0.7)
+        ctype, sitekey, interactive = await _detect_captcha(page)
+    return ctype, sitekey, interactive
 
 
 async def _inject_captcha_token(page: Page, captcha_type: str, token: str) -> None:
@@ -2232,7 +2265,12 @@ async def fill_and_submit(
         return {"status": "expired"}
 
     # ── CAPTCHA detection & solving ───────────────────────────────────────────
-    captcha_type, sitekey, captcha_interactive = await _detect_captcha(page)
+    # In manual mode, give async CAPTCHA widgets a few seconds to render so we
+    # reliably catch (and pause on) real v2/hCaptcha checkboxes.
+    if manual_captcha:
+        captcha_type, sitekey, captcha_interactive = await _detect_captcha_wait(page)
+    else:
+        captcha_type, sitekey, captcha_interactive = await _detect_captcha(page)
     if captcha_type:
         solved = False
 
@@ -2358,6 +2396,26 @@ async def fill_and_submit(
             # Check if we landed on a success page
             if await _detect_success(page):
                 return {"status": "entered", "steps": step + 1}
+            # Manual mode: a CAPTCHA often appears only AFTER clicking submit.
+            # If one showed up now, pause for the human, then submit again.
+            if manual_captcha and not defer_captcha:
+                ct2, _sk2, ci2 = await _detect_captcha_wait(page, timeout=4.0)
+                if ct2 and ci2 and not await _is_captcha_solved(page):
+                    logger.warning(
+                        "🔒 CAPTCHA appeared after submit on %s — please solve it. "
+                        "Waiting up to %ds…", page.url, int(manual_captcha_timeout),
+                    )
+                    if await _wait_for_manual_captcha(page, manual_captcha_timeout):
+                        logger.warning("✓ CAPTCHA solved — resubmitting.")
+                        await _click_submit(page)
+                        try:
+                            await page.wait_for_load_state("domcontentloaded", timeout=5_000)
+                        except PlaywrightTimeout:
+                            await asyncio.sleep(2.0)
+                        if await _detect_success(page):
+                            return {"status": "entered", "steps": step + 1}
+                    else:
+                        return {"status": "captcha", "detail": "manual solve timed out"}
             # Check if another step appeared
             next_clicked = await _try_next_step(page)
             if not next_clicked:

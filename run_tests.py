@@ -882,6 +882,25 @@ async def test_detect_captcha_interactive_v2():
     assert interactive is True, "Normal-size v2 widget should be interactive"
 
 
+async def test_detect_captcha_v2_zero_height_still_interactive():
+    """A v2 container that hasn't rendered its iframe yet (height 0) is still
+    treated as interactive — this was the bug that skipped real CAPTCHAs."""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import _detect_captcha
+    html = """<html><body>
+    <div class="g-recaptcha" data-sitekey="ABC"
+         style="width:304px;height:0px"></div>
+    </body></html>"""
+    async with BrowserManager(headless=True) as bm:
+        page = await bm.new_page()
+        await page.set_content(html)
+        ctype, sitekey, interactive = await _detect_captcha(page)
+        await page.close()
+    assert ctype == "recaptcha"
+    assert interactive is True, \
+        "A not-yet-rendered v2 widget must still be interactive (not skipped)"
+
+
 async def test_detect_captcha_invisible_v3_not_interactive():
     """An invisible reCAPTCHA v3 (data-size=invisible) is NOT interactive."""
     from sweepstake_genie.browser import BrowserManager
@@ -984,6 +1003,7 @@ for fn in [
     test_manual_captcha_detects_solved_token,
     test_manual_captcha_times_out,
     test_detect_captcha_interactive_v2,
+    test_detect_captcha_v2_zero_height_still_interactive,
     test_detect_captcha_invisible_v3_not_interactive,
     test_detect_captcha_none_on_plain_page,
     test_manual_mode_skips_invisible_v3,

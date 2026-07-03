@@ -190,52 +190,27 @@ async def _run_enter_async(config: Config, db: Database) -> None:
     stop_event = asyncio.Event()
 
     if config.manual_captcha:
-        # ── Two-pass manual mode ──────────────────────────────────────────────
-        # Pass 1 runs everything HEADLESS (no window) and simply queues any page
-        # that shows a real, interactive CAPTCHA. Pass 2 opens a single VISIBLE
-        # window, one page at a time, only for those queued pages — so windows
-        # appear for CAPTCHAs, never for ordinary entry pages.
-        deferred: list[dict] = []
-        concurrency = max(1, config.concurrency)
+        # ── Manual mode: single VISIBLE pass ──────────────────────────────────
+        # A visible browser processes entries one at a time. When a CAPTCHA
+        # appears it pauses so you can solve it, then finishes the entry. Headed
+        # rendering is what makes CAPTCHAs reliably appear (and forms fill), so
+        # this is far more dependable than any headless-detection scheme.
         console.print(
-            f"[bold]Pass 1/2 — processing {total} sweepstakes in the background "
-            f"({concurrency} workers, no window)…[/bold]"
+            "[bold yellow]Manual CAPTCHA mode:[/bold yellow] a browser window will "
+            "open and go through your sweepstakes one at a time. When a CAPTCHA "
+            f"appears, solve it in the window (up to {int(config.manual_captcha_timeout)}s each) "
+            "and the entry finishes automatically."
         )
-        sem1 = asyncio.Semaphore(concurrency)
-        async with BrowserManager(headless=True) as bm:
+        semaphore = asyncio.Semaphore(1)  # one window, one entry at a time
+        async with BrowserManager(headless=False) as bm:
             tasks = [
                 _enter_worker(bm, sw, i + 1, total, config, db, captcha_solver,
-                              sem1, stop_event,
-                              defer_captcha=True, deferred_sink=deferred)
+                              semaphore, stop_event)
                 for i, sw in enumerate(all_entries)
             ]
             for r in await asyncio.gather(*tasks, return_exceptions=True):
                 if isinstance(r, BaseException):
                     logger.error("Worker task raised unhandled exception: %s", r)
-
-        if deferred:
-            n = len(deferred)
-            console.print(
-                f"\n[bold yellow]Pass 2/2 — {n} sweepstake(s) need a CAPTCHA.[/bold yellow] "
-                "A browser window will open for each one; solve it and the entry "
-                f"finishes automatically (up to {int(config.manual_captcha_timeout)}s each)."
-            )
-            sem2 = asyncio.Semaphore(1)  # one visible window at a time
-            async with BrowserManager(headless=False) as bm:
-                tasks = [
-                    _enter_worker(bm, sw, i + 1, n, config, db, captcha_solver,
-                                  sem2, stop_event,
-                                  defer_captcha=False, deferred_sink=None)
-                    for i, sw in enumerate(deferred)
-                ]
-                for r in await asyncio.gather(*tasks, return_exceptions=True):
-                    if isinstance(r, BaseException):
-                        logger.error("Worker task raised unhandled exception: %s", r)
-        else:
-            console.print(
-                "[green]No CAPTCHAs needed solving — everything ran in the "
-                "background with no window.[/green]"
-            )
     else:
         # ── Standard single-pass mode ─────────────────────────────────────────
         concurrency = config.concurrency

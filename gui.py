@@ -735,26 +735,14 @@ class SweepstakeGenieApp(ctk.CTk):
 
                 async def _run_entries() -> None:
                     if _manual_captcha:
-                        # Pass 1: headless bulk — queue pages that show a real CAPTCHA
-                        deferred: list = []
+                        # Manual mode: a single VISIBLE window goes through entries
+                        # one at a time and pauses on each CAPTCHA so you can solve it.
                         self._log_queue.put(
-                            f"[{_ts()}] Pass 1/2 — processing {total} in the background "
-                            f"({concurrency} workers, no window)…"
+                            f"[{_ts()}] Manual CAPTCHA mode — opening a visible browser; "
+                            "solve each CAPTCHA in the window when it appears."
                         )
-                        await _run_batch(pending, headless=True, workers=concurrency,
-                                         defer_captcha=True, deferred_sink=deferred)
-                        # Pass 2: visible window, one at a time, only for CAPTCHA pages
-                        if deferred and not self._stop_flag.is_set():
-                            self._log_queue.put(
-                                f"[{_ts()}] Pass 2/2 — {len(deferred)} need a CAPTCHA; "
-                                "a window will open for each one to solve…"
-                            )
-                            await _run_batch(deferred, headless=False, workers=1,
-                                             defer_captcha=False, deferred_sink=None)
-                        elif not deferred:
-                            self._log_queue.put(
-                                f"[{_ts()}] No CAPTCHAs needed solving — all done in the background."
-                            )
+                        await _run_batch(pending, headless=False, workers=1,
+                                         defer_captcha=False, deferred_sink=None)
                     else:
                         await _run_batch(pending, headless=_run_headless,
                                          workers=concurrency,
@@ -957,24 +945,13 @@ class SweepstakeGenieApp(ctk.CTk):
 
                 async def _run_daily() -> None:
                     if _manual_captcha:
-                        deferred: list = []
+                        # Single visible window, one entry at a time, pausing on CAPTCHAs.
                         self._log_queue.put(
-                            f"[{_ts()}] Pass 1/2 — processing {total} in the background "
-                            f"({concurrency} workers, no window)…"
+                            f"[{_ts()}] Manual CAPTCHA mode — opening a visible browser; "
+                            "solve each CAPTCHA in the window when it appears."
                         )
-                        await _run_daily_batch(pending, headless=True, workers=concurrency,
-                                               defer_captcha=True, deferred_sink=deferred)
-                        if deferred and not self._stop_flag.is_set():
-                            self._log_queue.put(
-                                f"[{_ts()}] Pass 2/2 — {len(deferred)} need a CAPTCHA; "
-                                "a window will open for each one to solve…"
-                            )
-                            await _run_daily_batch(deferred, headless=False, workers=1,
-                                                   defer_captcha=False, deferred_sink=None)
-                        elif not deferred:
-                            self._log_queue.put(
-                                f"[{_ts()}] No CAPTCHAs needed solving — all done in the background."
-                            )
+                        await _run_daily_batch(pending, headless=False, workers=1,
+                                               defer_captcha=False, deferred_sink=None)
                     else:
                         await _run_daily_batch(pending, headless=_run_headless,
                                                workers=concurrency,
@@ -1411,7 +1388,7 @@ class SweepstakeGenieApp(ctk.CTk):
         ctk.CTkLabel(parent, text="Manual CAPTCHA:", anchor="e", width=200).grid(
             row=row, column=0, sticky="e", padx=(10, 4), pady=8
         )
-        self._manual_captcha_var = ctk.BooleanVar(value=False)
+        self._manual_captcha_var = ctk.BooleanVar(value=True)
         self._manual_captcha_cb = ctk.CTkCheckBox(
             parent,
             text="Pause and let me solve CAPTCHAs in a visible window "

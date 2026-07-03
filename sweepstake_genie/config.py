@@ -26,7 +26,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "database": "sweepstakes.db",
     "captcha_service": "none",
     "captcha_api_key": "",
-    "manual_captcha": False,
+    "manual_captcha": True,
     "manual_captcha_timeout": 180,
 }
 
