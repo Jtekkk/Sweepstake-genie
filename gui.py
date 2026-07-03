@@ -514,7 +514,12 @@ class SweepstakeGenieApp(ctk.CTk):
                     f"[{_ts()}] Scraping {len(sources)} sources: "
                     + ", ".join(sources)
                 )
-                sweepstakes = discover_all()
+                source_counts: dict[str, int] = {}
+
+                def _on_source(name: str, count: int) -> None:
+                    source_counts[name] = count
+
+                sweepstakes = discover_all(on_source=_on_source)
                 new_count = 0
                 for sw in sweepstakes:
                     if self._stop_flag.is_set():
@@ -523,6 +528,23 @@ class SweepstakeGenieApp(ctk.CTk):
                     added = db.add_sweepstake(sw["url"], sw["title"], sw["source"])
                     if added:
                         new_count += 1
+
+                # Per-source breakdown so it's clear which sources are producing.
+                nonzero = {k: v for k, v in source_counts.items() if v}
+                dead = [k for k, v in source_counts.items() if not v]
+                top = sorted(nonzero.items(), key=lambda kv: -kv[1])[:20]
+                if top:
+                    self._log_queue.put(
+                        f"[{_ts()}] Top sources: "
+                        + ", ".join(f"{k}={v}" for k, v in top)
+                    )
+                self._log_queue.put(
+                    f"[{_ts()}] {len(nonzero)} sources produced results; "
+                    f"{len(dead)} returned 0 (blocked/dead/empty)."
+                )
+                self._log_queue.put(
+                    f"[{_ts()}] freebiemom_db: {source_counts.get('freebiemom_db', 0)} sweepstakes"
+                )
                 self._log_queue.put(
                     f"[{_ts()}] Found {len(sweepstakes)} sweepstakes, "
                     f"{new_count} new added to database."

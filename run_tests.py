@@ -626,6 +626,43 @@ def test_discover_all_progress_callback():
     assert final_done == final_total, f"progress ended at {final_done}/{final_total}"
 
 
+def test_discover_all_on_source_callback():
+    """discover_all reports a per-source count via on_source for every source."""
+    from sweepstake_genie import scraper
+    import requests
+
+    mock_resp_html = MagicMock()
+    mock_resp_html.text = _MOCK_HTML
+    mock_resp_html.raise_for_status = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.text = _VALID_RSS
+    mock_resp.raise_for_status = MagicMock()
+
+    def mock_get(url, *args, **kwargs):
+        if "feed" in url:
+            return mock_resp
+        if "reddit.com" in url:
+            r = MagicMock()
+            r.json.return_value = {"data": {"children": []}}
+            r.raise_for_status = MagicMock()
+            return r
+        return mock_resp_html
+
+    counts = {}
+
+    def on_source(name, count):
+        counts[name] = count
+
+    with patch.object(requests.Session, "get", side_effect=mock_get), \
+         patch("sweepstake_genie.scraper.time") as mock_time:
+        mock_time.sleep = MagicMock()
+        scraper.discover_all(max_workers=4, on_source=on_source)
+
+    assert counts, "on_source should have been called at least once"
+    assert "freebiemom_db" in counts, "every registered source should report a count"
+    assert all(isinstance(v, int) for v in counts.values())
+
+
 def test_get_retries_on_failure():
     """_get should retry transient failures and eventually return None."""
     from sweepstake_genie import scraper
@@ -694,6 +731,7 @@ for fn in [
     test_scrape_pages_basic,
     test_scrape_pages_skips_twitter,
     test_scrape_freebiemom_db,
+    test_discover_all_on_source_callback,
     test_discover_all_mocked,
     test_discover_all_progress_callback,
     test_get_retries_on_failure,

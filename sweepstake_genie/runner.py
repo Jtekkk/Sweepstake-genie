@@ -55,9 +55,25 @@ def run_discover(db: Database) -> int:
         def _on_progress(done: int, total: int, source: str) -> None:
             progress.update(task, total=total, completed=done, source=source)
 
-        sweepstakes = discover_all(progress=_on_progress)
+        source_counts: dict[str, int] = {}
+
+        def _on_source(name: str, count: int) -> None:
+            source_counts[name] = count
+
+        sweepstakes = discover_all(progress=_on_progress, on_source=_on_source)
 
     new_count = db.add_sweepstakes_bulk(sweepstakes)
+
+    # Per-source breakdown — makes it obvious which sources work and which are dead.
+    nonzero = {k: v for k, v in source_counts.items() if v}
+    dead = [k for k, v in source_counts.items() if not v]
+    top = sorted(nonzero.items(), key=lambda kv: -kv[1])[:20]
+    if top:
+        console.print("[dim]Top sources: " + ", ".join(f"{k}={v}" for k, v in top) + "[/dim]")
+    console.print(
+        f"[dim]{len(nonzero)} sources produced results; "
+        f"{len(dead)} returned 0.[/dim]"
+    )
     console.print(
         f"[green]Found {len(sweepstakes)} sweepstakes, "
         f"{new_count} new added to database.[/green]"

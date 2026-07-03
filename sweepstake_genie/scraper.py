@@ -1221,6 +1221,7 @@ def discover_all(
     *,
     max_workers: int = _MAX_WORKERS,
     progress: Callable[[int, int, str], None] | None = None,
+    on_source: Callable[[str, int], None] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Run all scrapers concurrently, deduplicate by URL, and return the combined list.
@@ -1276,10 +1277,18 @@ def discover_all(
         future_to_name = {executor.submit(fn): name for name, fn in tasks}
         for future in as_completed(future_to_name):
             name = future_to_name[future]
+            count = 0
             try:
-                _add(future.result())
+                res = future.result()
+                count = len(res)
+                _add(res)
             except Exception as exc:
                 logger.error("Scraper '%s' failed: %s", name, exc)
+            if on_source is not None:
+                try:
+                    on_source(name, count)
+                except Exception:
+                    pass  # never let a callback break discovery
             done += 1
             if progress is not None:
                 try:
