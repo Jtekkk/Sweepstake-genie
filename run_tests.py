@@ -1122,6 +1122,39 @@ async def test_manual_mode_skips_newsletter_captcha():
         f"Newsletter (Subscribe) box + captcha should skip to no_form, got {result}"
 
 
+async def test_email_plus_plain_submit_is_entry():
+    """Email box + a plain 'Submit' button IS a real entry (must not be skipped)."""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import _is_real_entry_form
+    html = """<html><body><h1>Win a Prize</h1><form>
+      <input type="email" name="email" placeholder="Your email">
+      <button type="submit">Submit</button>
+    </form></body></html>"""
+    async with BrowserManager(headless=True) as bm:
+        page = await bm.new_page()
+        await page.set_content(html)
+        is_entry = await _is_real_entry_form(page)
+        await page.close()
+    assert is_entry is True, "email + plain Submit should be treated as an entry"
+
+
+async def test_comment_form_is_not_entry():
+    """A blog comment box (email + 'Post Comment') is NOT a sweepstakes entry."""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import _is_real_entry_form
+    html = """<html><body><form>
+      <input type="email" name="email" placeholder="Email">
+      <textarea name="comment"></textarea>
+      <button type="submit">Post Comment</button>
+    </form></body></html>"""
+    async with BrowserManager(headless=True) as bm:
+        page = await bm.new_page()
+        await page.set_content(html)
+        is_entry = await _is_real_entry_form(page)
+        await page.close()
+    assert is_entry is False, "a comment form should not be treated as an entry"
+
+
 async def test_manual_mode_pauses_on_email_only_entry():
     """An email-only sweepstakes ('enter your email' + Enter button) + CAPTCHA is
     a REAL entry — manual mode should pause for it, not skip it."""
@@ -1211,6 +1244,8 @@ for fn in [
     test_fill_and_submit_skips_login_wall,
     test_advance_to_entry_form_clicks_enter,
     test_manual_mode_skips_newsletter_captcha,
+    test_email_plus_plain_submit_is_entry,
+    test_comment_form_is_not_entry,
     test_manual_mode_pauses_on_email_only_entry,
     test_manual_mode_pauses_on_real_entry_form,
     test_manual_mode_skips_invisible_v3,

@@ -453,11 +453,15 @@ _ENTRY_BTN_WORDS = (
     "claim", "count me in", "i'm in", "im in", "get my entries",
     "official entry", "play now", "spin", "enter",
 )
-# Button/link text that signals a NEWSLETTER / mailing-list signup (not an entry).
+# Button/link text that signals a NON-entry form — a newsletter/mailing-list
+# signup or a blog comment box — which we should NOT treat as a sweepstakes entry.
 _NEWSLETTER_BTN_WORDS = (
     "subscribe", "sign up", "signup", "get the newsletter", "join our newsletter",
     "join the newsletter", "join our list", "join our email", "get deals",
     "notify me", "get updates", "get our emails",
+    # Blog comment forms
+    "post comment", "leave a comment", "add comment", "submit comment",
+    "post reply", "leave a reply", "add a comment",
 )
 
 
@@ -502,28 +506,20 @@ async def _is_real_entry_form(page: Page) -> bool:
 
     True when any of:
       • it has 2+ recognised entry fields (name/address/city/zip/phone/DOB), or
-      • it has an input AND an Enter-style submit button (covers email-only
-        sweepstakes — "enter your email and submit"), or
-      • it has an input with an ambiguous button but is NOT on a known
-        sweepstakes-blog domain (brand pages get the benefit of the doubt).
-    False for a lone newsletter/subscribe box, especially on blog domains.
+      • it has an input plus a submit button that is NOT clearly a newsletter or
+        comment button. This covers the common email-only sweepstakes ("enter
+        your email and submit") — a plain "Submit"/"Go"/arrow button counts.
+    False only when the sole action is clearly a Subscribe/Sign-up/Post-Comment
+    button (a mailing-list signup or comment box), which we skip.
     """
     if await _count_entry_fields(page) >= 2:
         return True
     if not await _has_form_fields(page):
         return False
+    # An input is present. Attempt it as an entry UNLESS the button clearly
+    # marks it as a newsletter signup or a comment form.
     intent = await _submit_button_intent(page)
-    if intent == "entry":
-        return True
-    if intent == "newsletter":
-        return False
-    # Ambiguous button + a single field: attempt it unless we're on a blog whose
-    # newsletter box is the likely source of the CAPTCHA.
-    host = urlparse(page.url).netloc.lower()
-    host = host[4:] if host.startswith("www.") else host
-    if host in _AGGREGATOR_BLOG_DOMAINS:
-        return False
-    return True
+    return intent != "newsletter"
 
 
 async def _wait_for_form(page: Page) -> bool:
