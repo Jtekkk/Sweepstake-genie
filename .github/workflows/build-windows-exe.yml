@@ -44,6 +44,11 @@ jobs:
       - name: Install Chromium for tests
         run: python -m playwright install chromium
 
+      # profile.yaml is gitignored (personal data); the config/CLI tests need
+      # one present, so create it from the committed example.
+      - name: Create profile.yaml from example
+        run: python -c "import shutil; shutil.copy('profile.example.yaml', 'profile.yaml')"
+
       - name: Run unit tests
         run: python run_tests.py
 
