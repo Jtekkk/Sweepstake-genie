@@ -1102,7 +1102,6 @@ async def _fill_full_name(page: Page, profile: dict[str, str]) -> bool:
         try:
             el = await page.query_selector(sel)
             if el and await el.is_visible() and await el.is_enabled():
-                await el.triple_click()
                 await el.fill(full_name)
                 await _human_delay()
                 return True
@@ -1164,7 +1163,6 @@ async def _fill_dob_date_input(page: Page, profile: dict[str, str]) -> int:
                 continue
             placeholder = (await el.get_attribute("placeholder") or "").upper()
             value = iso_date if placeholder.startswith("YYYY") else mdy_date
-            await el.triple_click()
             await el.fill(value)
             await _human_delay()
             filled += 1
@@ -1896,7 +1894,6 @@ async def _fill_field(page: Page, selectors: list[str], value: str, is_select: b
             if tag == "select" or is_select:
                 await page.select_option(sel, value=value)
             else:
-                await el.triple_click()
                 await el.fill(value)
 
             await _human_delay()
@@ -2010,7 +2007,6 @@ async def _fill_phone_smart(page: Page, phone: str) -> bool:
             current = await el.input_value()
             if current:
                 continue
-            await el.triple_click()
             await el.fill(value)
             await _human_delay()
             return True
@@ -2698,6 +2694,14 @@ async def fill_and_submit(
     if _wall:
         logger.info("Skipping %s — %s.", page.url, _wall)
         return {"status": "no_form", "detail": _wall}
+
+    # ── Non-entry form guard ──────────────────────────────────────────────────
+    # If there's a form present but it's clearly NOT a sweepstakes entry (a
+    # newsletter/comment box — email + Subscribe/Post-Comment), skip it. Don't
+    # submit it: that would sign the user up for spam and be a false "entered".
+    if (not is_entry_form) and await _has_form_fields(page):
+        logger.info("Not a sweepstakes entry form on %s — skipping.", page.url)
+        return {"status": "no_form", "detail": "not an entry form"}
 
     # ── CAPTCHA detection & solving ───────────────────────────────────────────
     # In manual mode, give async CAPTCHA widgets a few seconds to render so we

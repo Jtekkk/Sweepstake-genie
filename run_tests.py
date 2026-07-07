@@ -1158,6 +1158,39 @@ async def test_fill_and_submit_skips_login_wall():
         f"Form-less login wall should be skipped as no_form, got {result}"
 
 
+async def test_fill_field_actually_sets_value():
+    """_fill_field must actually put the value in the input and return True.
+    (Regression: a bad triple_click() call silently no-op'd all filling.)"""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import _fill_field, _FIELD_SELECTORS
+    async with BrowserManager(headless=True) as bm:
+        page = await bm.new_page()
+        await page.set_content("<input type='email' name='email'>")
+        filled = await _fill_field(page, _FIELD_SELECTORS["email"], "x@y.com")
+        value = await page.eval_on_selector("input[name=email]", "e => e.value")
+        await page.close()
+    assert filled is True, "_fill_field should report success"
+    assert value == "x@y.com", f"field should contain the value, got {value!r}"
+
+
+async def test_fill_and_submit_skips_subscribe_newsletter():
+    """An email + Subscribe form (no captcha) is a newsletter — skip, don't
+    submit it and falsely call it 'entered'."""
+    from sweepstake_genie.browser import BrowserManager
+    from sweepstake_genie.form_filler import fill_and_submit
+    html = """<html><body>
+    <h2>Newsletter</h2>
+    <form><input type="email" name="email"><button type="submit">Subscribe</button></form>
+    </body></html>"""
+    async with BrowserManager(headless=True) as bm:
+        page = await bm.new_page()
+        await page.set_content(html)
+        result = await fill_and_submit(page, _PROFILE, manual_captcha=False)
+        await page.close()
+    assert result["status"] == "no_form", \
+        f"a Subscribe newsletter should be skipped, got {result}"
+
+
 async def test_has_form_fields_ignores_search():
     """A site search box must NOT count as a fillable form (FreebieMom case)."""
     from sweepstake_genie.browser import BrowserManager
@@ -1368,6 +1401,8 @@ for fn in [
     test_detect_blocking_wall,
     test_has_unmet_required,
     test_fill_and_submit_skips_login_wall,
+    test_fill_field_actually_sets_value,
+    test_fill_and_submit_skips_subscribe_newsletter,
     test_has_form_fields_ignores_search,
     test_advance_past_search_box_to_enter_here,
     test_advance_to_entry_form_clicks_enter,
