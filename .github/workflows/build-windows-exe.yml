@@ -38,10 +38,17 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      # Chromium is NOT bundled — the app downloads it into the user's
-      # Playwright cache on first run (see ensure_browser_installed). This
-      # keeps the exe small; we only need the Playwright *package* present so
-      # the spec can collect its Node driver.
+      # Chromium is NOT bundled into the exe — the app downloads it into the
+      # user's Playwright cache on first run (see ensure_browser_installed). But
+      # CI needs a browser to run the tests, so install it here.
+      - name: Install Chromium for tests
+        run: python -m playwright install chromium
+
+      - name: Run unit tests
+        run: python run_tests.py
+
+      - name: Run end-to-end pipeline test
+        run: python e2e_test.py
 
       - name: Build EXE
         run: pyinstaller sweepstake_genie_gui.spec --clean --noconfirm
