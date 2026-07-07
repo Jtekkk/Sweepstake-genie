@@ -133,6 +133,9 @@ _EXCLUDE_TITLE_PATTERNS = frozenset([
     "sweepstaking", "contesting",   # category names, not entries
     "what really happens", "spring into", "master winning",
     "with me for free",
+    # Marketing / case-study copy (e.g. ViralSweep case studies)
+    "generated over", "generated $", "in revenue", "case study",
+    "turn social fans", "insiders.", "in sales within",
 ])
 
 
@@ -684,12 +687,8 @@ _PAGE_SOURCES: list[dict[str, Any]] = [
         "pages": ["/", "/sweepstakes/", "/page/2/", "/page/3/", "/page/4/"],
         "selector": "main",
     },
-    {
-        "name": "viralsweep_explore",
-        "base": "https://viralsweep.com",
-        "pages": ["/sweepstakes/", "/giveaways/"],
-        "selector": "main, .sweepstakes-list",
-    },
+    # NOTE: viralsweep.com/sweepstakes/ is ViralSweep's own marketing case-study
+    # index ("How X generated N entries…"), not live sweepstakes — removed.
     {
         "name": "travel_channel_sweeps",
         "base": "https://www.travelchannel.com",

@@ -64,6 +64,8 @@ FIXTURES = {
     "multi_step": ("""<h1>Step 1</h1>
       <form action="/step2" method="get"><input name="first_name" required>
         <input name="last_name" required><button type="submit">Continue</button></form>""", "entered"),
+    "iframe_form": ("""<h1>Enter Now</h1>
+      <iframe src="/embedded_form" width="600" height="400"></iframe>""", "entered"),
 }
 
 EXTRA_PAGES = {
@@ -76,6 +78,10 @@ EXTRA_PAGES = {
         <input type="email" name="email" required><input name="zip">
         <button type="submit">Submit Entry</button></form>""",
     "/login": "<h1>Login</h1><form><input name=user><input name=pass></form>",
+    "/embedded_form": """<form action="/thanks" method="get">
+        <input name="first_name" required><input name="last_name" required>
+        <input type="email" name="email" required>
+        <button type="submit">Enter</button></form>""",
 }
 
 

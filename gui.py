@@ -632,13 +632,12 @@ class SweepstakeGenieApp(ctk.CTk):
                 _manual_captcha = getattr(config, 'manual_captcha', False)
                 _manual_timeout = getattr(config, 'manual_captcha_timeout', 180.0)
                 _run_headless = config.headless
-                # Manual mode uses a two-pass flow (headless bulk pass, then a
-                # visible window ONLY for pages that actually show a CAPTCHA), so
-                # we do not force headless/concurrency here — each pass sets its own.
+                # Manual mode runs ONE visible worker (so CAPTCHAs appear one at a
+                # time); otherwise use the configured concurrency, headless.
+                _workers_desc = "1 visible worker" if _manual_captcha else f"{concurrency} parallel workers"
                 self._log_queue.put(("status", f"Entering {len(pending)} sweepstakes…"))
                 self._log_queue.put(
-                    f"[{_ts()}] Entering {len(pending)} sweepstakes "
-                    f"({concurrency} parallel workers)…"
+                    f"[{_ts()}] Entering {len(pending)} sweepstakes ({_workers_desc})…"
                 )
 
                 counts: dict[str, int] = {

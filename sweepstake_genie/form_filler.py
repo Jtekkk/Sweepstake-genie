@@ -2467,8 +2467,9 @@ _ENTER_CTA_SELECTORS = [
     "a:has-text('Enter for a Chance')", "button:has-text('Enter for a Chance')",
     "a:has-text('Enter Sweepstakes')", "a:has-text('Enter Contest Now')",
     # Aggregator "go to the sweepstakes" buttons (FreebieMom etc.)
+    # NOTE: deliberately NOT "Official link"/"Official Rules" — those go to the
+    # rules (often a PDF/external redirect) and can crash the page, not the entry.
     "a:has-text('Enter Daily')", "button:has-text('Enter Daily')",
-    "a:has-text('Official link')", "a:has-text('Official Rules Link')",
     "a:has-text('Go to Sweepstakes')", "a:has-text('Visit Sweepstakes')",
     "input[type='submit'][value*='Enter' i]",
     "input[type='button'][value*='Enter' i]",
@@ -2527,6 +2528,65 @@ async def _advance_to_entry_form(page: Page, max_hops: int = 3) -> bool:
         await asyncio.sleep(0.6)
         advanced = True
     return advanced
+
+
+async def _frame_has_entry_fields(frame) -> bool:
+    """True if a child frame has a visible name/email entry input."""
+    try:
+        return bool(await frame.evaluate("""
+            () => {
+                const e = document.querySelector(
+                    "input[type=email], input[name*='email' i], " +
+                    "input[name*='first' i], input[name*='fname' i], " +
+                    "input[name*='name' i]");
+                if (!e) return false;
+                const r = e.getBoundingClientRect();
+                return r.width > 0 || r.height > 0;
+            }
+        """))
+    except Exception:
+        return False
+
+
+async def _try_frames_entry(page: Page, profile: dict[str, str]) -> bool:
+    """
+    Fallback for forms embedded in an <iframe> (ViralSweep, Gleam, Woobox,
+    SecondStreet, KickoffLabs, …). Playwright can reach into child frames — even
+    cross-origin — so fill and submit the form inside the first frame that has
+    entry fields. Returns True if it looks like an entry was submitted.
+    """
+    for frame in page.frames:
+        if frame is page.main_frame:
+            continue
+        try:
+            if not await _frame_has_entry_fields(frame):
+                continue
+            filled = 0
+            for key, sels in _FIELD_SELECTORS.items():
+                val = profile.get(key, "")
+                if val and await _fill_field(frame, sels, val):
+                    filled += 1
+            if profile.get("state"):
+                await _fill_state(frame, profile["state"])
+            phone = profile.get("phone", "")
+            if phone and await _fill_phone_smart(frame, phone):
+                filled += 1
+            await _fill_required_controls(frame, profile)
+            await _check_terms(frame)
+            if filled == 0:
+                continue
+            if await _click_submit(frame):
+                await asyncio.sleep(2.0)
+                try:
+                    txt = (await frame.text_content("body") or "").lower()
+                except Exception:
+                    txt = ""
+                if any(p in txt for p in _SUCCESS_TEXT_PATTERNS) or filled >= 2:
+                    logger.info("Submitted an embedded iframe entry form on %s", page.url)
+                    return True
+        except Exception as exc:
+            logger.debug("iframe entry attempt failed: %s", exc)
+    return False
 
 
 # ── Main entry function ───────────────────────────────────────────────────────
@@ -2917,6 +2977,10 @@ async def fill_and_submit(
                     break
 
     if total_fields_filled == 0 and not submitted:
+        # No fillable form in the main frame — the entry form may be embedded in
+        # an <iframe> (common on contest platforms). Try that before giving up.
+        if await _try_frames_entry(page, profile):
+            return {"status": "entered", "steps": 1}
         return {"status": "no_form"}
 
     if not submitted:
@@ -2939,14 +3003,19 @@ async def enter_sweepstake(
     Navigate to *url* and attempt entry.  Wraps :func:`fill_and_submit` with
     navigation error handling and a single automatic retry on transient errors.
     """
+    last_result: dict[str, Any] | None = None
     for attempt in range(2):
         try:
             if attempt == 0:
                 await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
             else:
-                # Retry: reload the page
+                # A retry only makes sense if the page is still usable. Some sites
+                # navigate away / close the tab / crash the renderer during the
+                # first attempt — reloading a dead page just raises "Target closed".
+                if page.is_closed():
+                    return last_result or {"status": "error", "message": "page was closed"}
                 await page.reload(wait_until="domcontentloaded", timeout=20_000)
-                await asyncio.sleep(random.uniform(1.5, 3.0))
+                await asyncio.sleep(random.uniform(1.0, 2.0))
 
             result = await fill_and_submit(
                 page, profile, captcha_solver=captcha_solver,
@@ -2957,17 +3026,25 @@ async def enter_sweepstake(
 
             # Annotate successful entries with daily re-entry flag
             if result["status"] == "entered" and "allows_daily" not in result:
-                result["allows_daily"] = await _check_daily_entry(page)
+                try:
+                    result["allows_daily"] = await _check_daily_entry(page)
+                except Exception:
+                    pass
 
             # Only retry on transient errors, not on no_form/captcha/entered/expired
             if result["status"] not in ("error",) or attempt == 1:
                 return result
+            last_result = result  # remember it in case we can't retry
 
         except PlaywrightTimeout:
             if attempt == 1:
-                return {"status": "error", "message": f"Navigation timeout after retry: {url}"}
+                return {"status": "error", "message": "navigation timeout"}
         except Exception as exc:
-            if attempt == 1:
-                return {"status": "error", "message": str(exc)}
+            msg = str(exc)
+            # A closed/crashed page can't be retried — return a clean error.
+            if attempt == 1 or page.is_closed() \
+                    or "has been closed" in msg or "Target closed" in msg \
+                    or "crash" in msg.lower():
+                return {"status": "error", "message": msg[:120]}
 
-    return {"status": "error", "message": "Unknown failure"}
+    return last_result or {"status": "error", "message": "unknown failure"}
